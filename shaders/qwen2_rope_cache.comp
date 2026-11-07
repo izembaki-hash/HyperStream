@@ -1,0 +1,92 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint layer_idx;
+    uint max_seq_len;
+    uint num_q_heads;  // 14 for 0.5B, 28 for 7B
+    uint num_kv_heads; // 2 for 0.5B, 4 for 7B
+    uint head_dim;     // 64 for 0.5B, 128 for 7B
+    float theta;       // 1000000.0
+} pc;
+
+layout(std430, binding = 0) buffer QueryBuffer {
+    float q[];
+};
+
+layout(std430, binding = 1) buffer KeyBuffer {
+    float k[];
+};
+
+layout(std430, binding = 2) readonly buffer ValueBuffer {
+    float v[];
+};
+
+layout(std430, binding = 3) writeonly buffer KCacheBuffer {
+    float k_cache[];
+};
+
+layout(std430, binding = 4) writeonly buffer VCacheBuffer {
+    float v_cache[];
+};
+
+layout(std430, binding = 5) readonly buffer SeqPosBuffer {
+    uint current_pos;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint pos = current_pos;
+    uint half_dim = pc.head_dim / 2;
+    uint total_q_pairs = pc.num_q_heads * half_dim;
+    uint total_k_pairs = pc.num_kv_heads * half_dim;
+    uint kv_dim = pc.num_kv_heads * pc.head_dim;
+    uint cache_slot_base = (pc.layer_idx * pc.max_seq_len + pos) * kv_dim;
+
+    // 1. Half-split RoPE on Query (GPT-NeoX style)
+    if (tid < total_q_pairs) {
+        uint h = tid / half_dim;
+        uint i = tid % half_dim;
+        float freq = 1.0 / pow(pc.theta, float(2 * i) / float(pc.head_dim));
+        float val = float(pos) * freq;
+        float cos_val = cos(val);
+        float sin_val = sin(val);
+
+        uint idx0 = h * pc.head_dim + i;
+        uint idx1 = idx0 + half_dim;
+
+        float q0 = q[idx0];
+        float q1 = q[idx1];
+        q[idx0] = q0 * cos_val - q1 * sin_val;
+        q[idx1] = q0 * sin_val + q1 * cos_val;
+    }
+
+    // 2. Half-split RoPE on Key & write to K Cache
+    if (tid < total_k_pairs) {
+        uint h = tid / half_dim;
+        uint i = tid % half_dim;
+        float freq = 1.0 / pow(pc.theta, float(2 * i) / float(pc.head_dim));
+        float val = float(pos) * freq;
+        float cos_val = cos(val);
+        float sin_val = sin(val);
+
+        uint idx0 = h * pc.head_dim + i;
+        uint idx1 = idx0 + half_dim;
+
+        float k0 = k[idx0];
+        float k1 = k[idx1];
+        float rot_k0 = k0 * cos_val - k1 * sin_val;
+        float rot_k1 = k0 * sin_val + k1 * cos_val;
+
+        k[idx0] = rot_k0;
+        k[idx1] = rot_k1;
+
+        k_cache[cache_slot_base + idx0] = rot_k0;
+        k_cache[cache_slot_base + idx1] = rot_k1;
+    }
+
+    // 3. Write V to V Cache
+    if (tid < kv_dim) {
+        v_cache[cache_slot_base + tid] = v[tid];
+    }
+}

@@ -1,0 +1,159 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// Coalesced Q4_0 Fused SwiGLU for Qwen2.5-7B (Computes Gate & Up simultaneously and fuses silu(gate)*up)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint rows; // 18944
+    uint cols; // 3584
+} pc;
+
+layout(std430, binding = 0) readonly buffer InputVector {
+    float x[];
+};
+
+layout(std430, binding = 1) readonly buffer QuantsGate {
+    uvec4 quants_gate[]; // rows * (cols / 32)
+};
+
+layout(std430, binding = 2) readonly buffer ScalesGate {
+    uint scales_gate[];  // packed half2x16
+};
+
+layout(std430, binding = 3) readonly buffer QuantsUp {
+    uvec4 quants_up[];   // rows * (cols / 32)
+};
+
+layout(std430, binding = 4) readonly buffer ScalesUp {
+    uint scales_up[];    // packed half2x16
+};
+
+layout(std430, binding = 5) writeonly buffer OutputVector {
+    float y[]; // 18944 floats
+};
+
+void main() {
+    uint r = gl_WorkGroupID.x;
+    if (r >= pc.rows) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint num_blocks = pc.cols / 32u;
+    uint row_block_base = r * num_blocks;
+
+    float partial_gate = 0.0;
+    float partial_up = 0.0;
+
+    for (uint b = tid; b < num_blocks; b += 64u) {
+        uint blk_idx = row_block_base + b;
+        uint x_base = b * 32u;
+
+        // Gate block
+        uint pair_g = scales_gate[blk_idx >> 1u];
+        float d_g = ((blk_idx & 1u) == 0u) ? unpackHalf2x16(pair_g).x : unpackHalf2x16(pair_g).y;
+        uvec4 qg = quants_gate[blk_idx];
+
+        // Up block
+        uint pair_u = scales_up[blk_idx >> 1u];
+        float d_u = ((blk_idx & 1u) == 0u) ? unpackHalf2x16(pair_u).x : unpackHalf2x16(pair_u).y;
+        uvec4 qu = quants_up[blk_idx];
+
+        float sum_g = 0.0;
+        float sum_u = 0.0;
+
+        // 1. Process byte 0..3 (lo = x_base, hi = x_base + 16)
+        uint wg = qg.x;
+        uint wu = qu.x;
+        uint lo = x_base;
+        uint hi = x_base + 16u;
+
+        sum_g += float(int(wg & 0x0Fu) - 8) * x[lo + 0u];
+        sum_g += float(int((wg >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_g += float(int((wg >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_g += float(int((wg >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_g += float(int((wg >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_g += float(int((wg >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_g += float(int((wg >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_g += float(int((wg >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        sum_u += float(int(wu & 0x0Fu) - 8) * x[lo + 0u];
+        sum_u += float(int((wu >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_u += float(int((wu >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_u += float(int((wu >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_u += float(int((wu >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_u += float(int((wu >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_u += float(int((wu >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_u += float(int((wu >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 2. Process byte 4..7 (lo = x_base + 4, hi = x_base + 20)
+        wg = qg.y; wu = qu.y; lo = x_base + 4u; hi = x_base + 20u;
+        sum_g += float(int(wg & 0x0Fu) - 8) * x[lo + 0u];
+        sum_g += float(int((wg >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_g += float(int((wg >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_g += float(int((wg >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_g += float(int((wg >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_g += float(int((wg >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_g += float(int((wg >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_g += float(int((wg >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        sum_u += float(int(wu & 0x0Fu) - 8) * x[lo + 0u];
+        sum_u += float(int((wu >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_u += float(int((wu >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_u += float(int((wu >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_u += float(int((wu >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_u += float(int((wu >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_u += float(int((wu >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_u += float(int((wu >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 3. Process byte 8..11 (lo = x_base + 8, hi = x_base + 24)
+        wg = qg.z; wu = qu.z; lo = x_base + 8u; hi = x_base + 24u;
+        sum_g += float(int(wg & 0x0Fu) - 8) * x[lo + 0u];
+        sum_g += float(int((wg >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_g += float(int((wg >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_g += float(int((wg >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_g += float(int((wg >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_g += float(int((wg >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_g += float(int((wg >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_g += float(int((wg >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        sum_u += float(int(wu & 0x0Fu) - 8) * x[lo + 0u];
+        sum_u += float(int((wu >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_u += float(int((wu >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_u += float(int((wu >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_u += float(int((wu >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_u += float(int((wu >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_u += float(int((wu >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_u += float(int((wu >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 4. Process byte 12..15 (lo = x_base + 12, hi = x_base + 28)
+        wg = qg.w; wu = qu.w; lo = x_base + 12u; hi = x_base + 28u;
+        sum_g += float(int(wg & 0x0Fu) - 8) * x[lo + 0u];
+        sum_g += float(int((wg >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_g += float(int((wg >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_g += float(int((wg >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_g += float(int((wg >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_g += float(int((wg >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_g += float(int((wg >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_g += float(int((wg >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        sum_u += float(int(wu & 0x0Fu) - 8) * x[lo + 0u];
+        sum_u += float(int((wu >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        sum_u += float(int((wu >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        sum_u += float(int((wu >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        sum_u += float(int((wu >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        sum_u += float(int((wu >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        sum_u += float(int((wu >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        sum_u += float(int((wu >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        partial_gate += sum_g * d_g;
+        partial_up   += sum_u * d_u;
+    }
+
+    float gate_val = subgroupAdd(partial_gate);
+    float up_val   = subgroupAdd(partial_up);
+
+    if (subgroupElect()) {
+        float silu_gate = gate_val / (1.0 + exp(-gate_val));
+        y[r] = silu_gate * up_val;
+    }
+}

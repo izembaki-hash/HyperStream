@@ -1,0 +1,30 @@
+# Compiled Binaries and Objects
+*.exe
+*.o
+*.obj
+*.lib
+*.dll
+*.a
+bin/
+build/
+
+# GGUF and Neural Network Model Weights (Strictly Ignored)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.onnx
+models/*.gguf
+models/*.bin
+.cache/
+
+# Visual Studio & IDE
+.vscode/
+.vs/
+.idea/
+*.suo
+*.user
+
+# Operating System Files
+.DS_Store
+Thumbs.db

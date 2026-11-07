@@ -1,0 +1,107 @@
+#version 450
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint layer_idx;
+    uint max_seq_len;
+    uint num_q_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    float inv_sqrt_d;
+} pc;
+
+layout(std430, binding = 0) readonly buffer QueryBuffer {
+    float q[];
+};
+
+layout(std430, binding = 1) readonly buffer KCacheBuffer {
+    float k_cache[];
+};
+
+layout(std430, binding = 2) readonly buffer VCacheBuffer {
+    float v_cache[];
+};
+
+layout(std430, binding = 3) writeonly buffer AttentionOutBuffer {
+    float attn_head_out[];
+};
+
+layout(std430, binding = 4) readonly buffer SeqPosBuffer {
+    uint current_pos;
+};
+
+shared float s_q[128];
+shared float s_scores[1024];
+shared float s_sum[128];
+
+void main() {
+    uint h = gl_WorkGroupID.x;
+    if (h >= pc.num_q_heads) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint heads_per_kv = pc.num_q_heads / pc.num_kv_heads;
+    uint kv_h = h / heads_per_kv;
+    uint pos = current_pos;
+    uint kv_dim = pc.num_kv_heads * pc.head_dim;
+
+    // Load Q_h into shared memory
+    if (tid < pc.head_dim) {
+        s_q[tid] = q[h * pc.head_dim + tid];
+    }
+    barrier();
+
+    // 1. Compute dot products Q_h . K_t for t = 0..pos
+    uint layer_base = pc.layer_idx * pc.max_seq_len;
+    for (uint t = 0; t <= pos; ++t) {
+        float prod = 0.0;
+        if (tid < pc.head_dim) {
+            uint k_slot = (layer_base + t) * kv_dim + kv_h * pc.head_dim + tid;
+            prod = s_q[tid] * k_cache[k_slot];
+        }
+        s_sum[tid] = prod;
+        barrier();
+
+        // Wavefront reduction (128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1)
+        for (uint s = 64; s > 0; s >>= 1) {
+            if (tid < s) {
+                s_sum[tid] += s_sum[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            s_scores[t] = s_sum[0] * pc.inv_sqrt_d;
+        }
+        barrier();
+    }
+
+    // 2. Softmax over scores[0..pos] (executed safely by thread 0)
+    if (tid == 0) {
+        float max_score = -1e20;
+        for (uint t = 0; t <= pos; ++t) {
+            if (s_scores[t] > max_score) max_score = s_scores[t];
+        }
+
+        float exp_sum = 0.0;
+        for (uint t = 0; t <= pos; ++t) {
+            float ex = exp(s_scores[t] - max_score);
+            s_scores[t] = ex;
+            exp_sum += ex;
+        }
+        float inv_exp_sum = 1.0 / (exp_sum + 1e-10);
+        for (uint t = 0; t <= pos; ++t) {
+            s_scores[t] *= inv_exp_sum;
+        }
+    }
+    barrier();
+
+    // 3. Weighted sum over V_cache
+    if (tid < pc.head_dim) {
+        float out_val = 0.0;
+        for (uint t = 0; t <= pos; ++t) {
+            uint v_slot = (layer_base + t) * kv_dim + kv_h * pc.head_dim + tid;
+            out_val += s_scores[t] * v_cache[v_slot];
+        }
+        attn_head_out[h * pc.head_dim + tid] = out_val;
+    }
+}

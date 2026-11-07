@@ -1,0 +1,128 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// Coalesced Q4_0 Fused QKV GEMV for Qwen2.5-7B (1 Wavefront per Row + subgroupAdd Reduction + Bias Addition)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint num_q_rows; // 3584
+    uint num_k_rows; // 512
+    uint num_v_rows; // 512
+    uint cols;       // 3584
+} pc;
+
+layout(std430, binding = 0) readonly buffer InputVector {
+    float x[];
+};
+
+layout(std430, binding = 1) readonly buffer QuantsQKV {
+    uvec4 quants[]; // (num_q + num_k + num_v) * (cols / 32)
+};
+
+layout(std430, binding = 2) readonly buffer ScalesQKV {
+    uint scales[];  // packed half2x16
+};
+
+layout(std430, binding = 3) writeonly buffer OutputQ {
+    float q_out[];
+};
+
+layout(std430, binding = 4) writeonly buffer OutputK {
+    float k_out[];
+};
+
+layout(std430, binding = 5) writeonly buffer OutputV {
+    float v_out[];
+};
+
+layout(std430, binding = 6) readonly buffer BiasQKV {
+    float bias[]; // num_q + num_k + num_v floats
+};
+
+void main() {
+    uint r = gl_WorkGroupID.x;
+    uint total_rows = pc.num_q_rows + pc.num_k_rows + pc.num_v_rows;
+    if (r >= total_rows) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint num_blocks = pc.cols / 32u;
+    uint row_block_base = r * num_blocks;
+
+    float partial_sum = 0.0;
+
+    for (uint b = tid; b < num_blocks; b += 64u) {
+        uint blk_idx = row_block_base + b;
+        uint pair = scales[blk_idx >> 1u];
+        float d = ((blk_idx & 1u) == 0u) ? unpackHalf2x16(pair).x : unpackHalf2x16(pair).y;
+
+        uvec4 qv = quants[blk_idx];
+        uint x_base = b * 32u;
+        float block_sum = 0.0;
+
+        // 1. Process qv.x (bytes 0..3: weights 0..3 and 16..19)
+        uint w = qv.x;
+        uint lo = x_base;
+        uint hi = x_base + 16u;
+        block_sum += float(int(w & 0x0Fu) - 8) * x[lo + 0u];
+        block_sum += float(int((w >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        block_sum += float(int((w >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        block_sum += float(int((w >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        block_sum += float(int((w >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        block_sum += float(int((w >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        block_sum += float(int((w >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        block_sum += float(int((w >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 2. Process qv.y (bytes 4..7: weights 4..7 and 20..23)
+        w = qv.y;
+        lo = x_base + 4u;
+        hi = x_base + 20u;
+        block_sum += float(int(w & 0x0Fu) - 8) * x[lo + 0u];
+        block_sum += float(int((w >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        block_sum += float(int((w >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        block_sum += float(int((w >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        block_sum += float(int((w >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        block_sum += float(int((w >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        block_sum += float(int((w >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        block_sum += float(int((w >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 3. Process qv.z (bytes 8..11: weights 8..11 and 24..27)
+        w = qv.z;
+        lo = x_base + 8u;
+        hi = x_base + 24u;
+        block_sum += float(int(w & 0x0Fu) - 8) * x[lo + 0u];
+        block_sum += float(int((w >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        block_sum += float(int((w >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        block_sum += float(int((w >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        block_sum += float(int((w >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        block_sum += float(int((w >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        block_sum += float(int((w >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        block_sum += float(int((w >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        // 4. Process qv.w (bytes 12..15: weights 12..15 and 28..31)
+        w = qv.w;
+        lo = x_base + 12u;
+        hi = x_base + 28u;
+        block_sum += float(int(w & 0x0Fu) - 8) * x[lo + 0u];
+        block_sum += float(int((w >> 8u) & 0x0Fu) - 8) * x[lo + 1u];
+        block_sum += float(int((w >> 16u) & 0x0Fu) - 8) * x[lo + 2u];
+        block_sum += float(int((w >> 24u) & 0x0Fu) - 8) * x[lo + 3u];
+        block_sum += float(int((w >> 4u) & 0x0Fu) - 8) * x[hi + 0u];
+        block_sum += float(int((w >> 12u) & 0x0Fu) - 8) * x[hi + 1u];
+        block_sum += float(int((w >> 20u) & 0x0Fu) - 8) * x[hi + 2u];
+        block_sum += float(int((w >> 28u) & 0x0Fu) - 8) * x[hi + 3u];
+
+        partial_sum += block_sum * d;
+    }
+
+    float row_sum = subgroupAdd(partial_sum);
+    if (subgroupElect()) {
+        float val = row_sum + bias[r];
+        if (r < pc.num_q_rows) {
+            q_out[r] = val;
+        } else if (r < pc.num_q_rows + pc.num_k_rows) {
+            k_out[r - pc.num_q_rows] = val;
+        } else {
+            v_out[r - pc.num_q_rows - pc.num_k_rows] = val;
+        }
+    }
+}

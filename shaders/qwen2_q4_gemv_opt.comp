@@ -1,0 +1,116 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// Optimized HyperStream-Q4 GEMV for AMD Radeon RX 580 (GCN Polaris)
+// Features: Vectorized x loads, shared FP16 scale unpacking, fma instruction emission
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint rows;         // M (e.g. 3584 or 18944)
+    uint cols;         // K (e.g. 3584)
+    uint add_residual; // 1 to add to y[r], 0 to overwrite
+} pc;
+
+layout(std430, binding = 0) readonly buffer InputVector {
+    vec4 x_vec[]; // Accessed as vec4 for 128-bit vector loads
+};
+
+layout(std430, binding = 1) readonly buffer QuantsBuffer {
+    uvec4 quants[]; // rows * (cols / 32)
+};
+
+layout(std430, binding = 2) readonly buffer ScalesBuffer {
+    uint scales[];  // packed half2x16
+};
+
+layout(std430, binding = 3) buffer OutputVector {
+    float y[];
+};
+
+void main() {
+    uint r = gl_WorkGroupID.x;
+    if (r >= pc.rows) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint num_blocks = pc.cols / 32u;
+    uint row_block_base = r * num_blocks;
+
+    float partial_sum = 0.0;
+
+    for (uint b = tid; b < num_blocks; b += 64u) {
+        uint blk_idx = row_block_base + b;
+        uint pair = scales[blk_idx >> 1u];
+        vec2 d_pair = unpackHalf2x16(pair);
+        float d = ((blk_idx & 1u) == 0u) ? d_pair.x : d_pair.y;
+
+        uvec4 qv = quants[blk_idx];
+        uint x_vbase = b * 8u; // each block has 32 floats = 8 vec4s
+
+        // Load all 8 vec4s (32 floats) with 128-bit vector memory instructions
+        vec4 x0 = x_vec[x_vbase + 0u]; // lo: floats 0..3
+        vec4 x1 = x_vec[x_vbase + 1u]; // lo: floats 4..7
+        vec4 x2 = x_vec[x_vbase + 2u]; // lo: floats 8..11
+        vec4 x3 = x_vec[x_vbase + 3u]; // lo: floats 12..15
+        vec4 x4 = x_vec[x_vbase + 4u]; // hi: floats 16..19
+        vec4 x5 = x_vec[x_vbase + 5u]; // hi: floats 20..23
+        vec4 x6 = x_vec[x_vbase + 6u]; // hi: floats 24..27
+        vec4 x7 = x_vec[x_vbase + 7u]; // hi: floats 28..31
+
+        float block_sum = 0.0;
+
+        // Process qv.x (bytes 0..3)
+        uint w = qv.x;
+        block_sum = fma(float(int(w & 0x0Fu) - 8), x0.x, block_sum);
+        block_sum = fma(float(int((w >> 8u) & 0x0Fu) - 8), x0.y, block_sum);
+        block_sum = fma(float(int((w >> 16u) & 0x0Fu) - 8), x0.z, block_sum);
+        block_sum = fma(float(int((w >> 24u) & 0x0Fu) - 8), x0.w, block_sum);
+        block_sum = fma(float(int((w >> 4u) & 0x0Fu) - 8), x4.x, block_sum);
+        block_sum = fma(float(int((w >> 12u) & 0x0Fu) - 8), x4.y, block_sum);
+        block_sum = fma(float(int((w >> 20u) & 0x0Fu) - 8), x4.z, block_sum);
+        block_sum = fma(float(int((w >> 28u) & 0x0Fu) - 8), x4.w, block_sum);
+
+        // Process qv.y (bytes 4..7)
+        w = qv.y;
+        block_sum = fma(float(int(w & 0x0Fu) - 8), x1.x, block_sum);
+        block_sum = fma(float(int((w >> 8u) & 0x0Fu) - 8), x1.y, block_sum);
+        block_sum = fma(float(int((w >> 16u) & 0x0Fu) - 8), x1.z, block_sum);
+        block_sum = fma(float(int((w >> 24u) & 0x0Fu) - 8), x1.w, block_sum);
+        block_sum = fma(float(int((w >> 4u) & 0x0Fu) - 8), x5.x, block_sum);
+        block_sum = fma(float(int((w >> 12u) & 0x0Fu) - 8), x5.y, block_sum);
+        block_sum = fma(float(int((w >> 20u) & 0x0Fu) - 8), x5.z, block_sum);
+        block_sum = fma(float(int((w >> 28u) & 0x0Fu) - 8), x5.w, block_sum);
+
+        // Process qv.z (bytes 8..11)
+        w = qv.z;
+        block_sum = fma(float(int(w & 0x0Fu) - 8), x2.x, block_sum);
+        block_sum = fma(float(int((w >> 8u) & 0x0Fu) - 8), x2.y, block_sum);
+        block_sum = fma(float(int((w >> 16u) & 0x0Fu) - 8), x2.z, block_sum);
+        block_sum = fma(float(int((w >> 24u) & 0x0Fu) - 8), x2.w, block_sum);
+        block_sum = fma(float(int((w >> 4u) & 0x0Fu) - 8), x6.x, block_sum);
+        block_sum = fma(float(int((w >> 12u) & 0x0Fu) - 8), x6.y, block_sum);
+        block_sum = fma(float(int((w >> 20u) & 0x0Fu) - 8), x6.z, block_sum);
+        block_sum = fma(float(int((w >> 28u) & 0x0Fu) - 8), x6.w, block_sum);
+
+        // Process qv.w (bytes 12..15)
+        w = qv.w;
+        block_sum = fma(float(int(w & 0x0Fu) - 8), x3.x, block_sum);
+        block_sum = fma(float(int((w >> 8u) & 0x0Fu) - 8), x3.y, block_sum);
+        block_sum = fma(float(int((w >> 16u) & 0x0Fu) - 8), x3.z, block_sum);
+        block_sum = fma(float(int((w >> 24u) & 0x0Fu) - 8), x3.w, block_sum);
+        block_sum = fma(float(int((w >> 4u) & 0x0Fu) - 8), x7.x, block_sum);
+        block_sum = fma(float(int((w >> 12u) & 0x0Fu) - 8), x7.y, block_sum);
+        block_sum = fma(float(int((w >> 20u) & 0x0Fu) - 8), x7.z, block_sum);
+        block_sum = fma(float(int((w >> 28u) & 0x0Fu) - 8), x7.w, block_sum);
+
+        partial_sum = fma(block_sum, d, partial_sum);
+    }
+
+    float row_sum = subgroupAdd(partial_sum);
+    if (subgroupElect()) {
+        if (pc.add_residual != 0u) {
+            y[r] += row_sum;
+        } else {
+            y[r] = row_sum;
+        }
+    }
+}

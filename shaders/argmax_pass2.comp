@@ -1,0 +1,58 @@
+#version 450
+
+// GPU Argmax Pass 2: Final Reduction of 128 Partial Candidates down to 1 Winner
+// Dispatched with 1 single workgroup of 128 threads
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint num_candidates; // 128
+} pc;
+
+layout(std430, binding = 0) readonly buffer PartialValues {
+    float in_vals[];
+};
+
+layout(std430, binding = 1) readonly buffer PartialIndices {
+    uint in_ids[];
+};
+
+layout(std430, binding = 2) writeonly buffer OutputToken {
+    uint best_token_id;
+    float best_logit_val;
+};
+
+shared float s_vals[128];
+shared uint  s_ids[128];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Load candidate
+    if (tid < pc.num_candidates) {
+        s_vals[tid] = in_vals[tid];
+        s_ids[tid]  = in_ids[tid];
+    } else {
+        s_vals[tid] = -3.402823466e+38;
+        s_ids[tid]  = 0xFFFFFFFF;
+    }
+    barrier();
+
+    // In-Workgroup Tree Reduction (128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1)
+    for (uint s = 64; s > 0; s >>= 1) {
+        if (tid < s) {
+            float other_val = s_vals[tid + s];
+            uint  other_id  = s_ids[tid + s];
+            if (other_val > s_vals[tid] || (other_val == s_vals[tid] && other_id < s_ids[tid])) {
+                s_vals[tid] = other_val;
+                s_ids[tid]  = other_id;
+            }
+        }
+        barrier();
+    }
+
+    // Thread 0 writes the ultimate winner
+    if (tid == 0) {
+        best_token_id  = s_ids[0];
+        best_logit_val = s_vals[0];
+    }
+}

@@ -1,0 +1,81 @@
+#ifndef VK_DISPATCH_H
+#define VK_DISPATCH_H
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <windows.h>
+#include <vulkan/vulkan.h>
+#include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Global Vulkan Function Pointers
+extern PFN_vkCreateInstance g_pfn_vkCreateInstance;
+extern PFN_vkDestroyInstance g_pfn_vkDestroyInstance;
+extern PFN_vkEnumeratePhysicalDevices g_pfn_vkEnumeratePhysicalDevices;
+extern PFN_vkGetPhysicalDeviceProperties g_pfn_vkGetPhysicalDeviceProperties;
+extern PFN_vkGetPhysicalDeviceFeatures g_pfn_vkGetPhysicalDeviceFeatures;
+extern PFN_vkGetPhysicalDeviceMemoryProperties g_pfn_vkGetPhysicalDeviceMemoryProperties;
+extern PFN_vkGetPhysicalDeviceQueueFamilyProperties g_pfn_vkGetPhysicalDeviceQueueFamilyProperties;
+extern PFN_vkCreateDevice g_pfn_vkCreateDevice;
+extern PFN_vkDestroyDevice g_pfn_vkDestroyDevice;
+extern PFN_vkGetDeviceQueue g_pfn_vkGetDeviceQueue;
+extern PFN_vkCreateCommandPool g_pfn_vkCreateCommandPool;
+extern PFN_vkDestroyCommandPool g_pfn_vkDestroyCommandPool;
+extern PFN_vkAllocateCommandBuffers g_pfn_vkAllocateCommandBuffers;
+extern PFN_vkFreeCommandBuffers g_pfn_vkFreeCommandBuffers;
+extern PFN_vkBeginCommandBuffer g_pfn_vkBeginCommandBuffer;
+extern PFN_vkEndCommandBuffer g_pfn_vkEndCommandBuffer;
+extern PFN_vkQueueSubmit g_pfn_vkQueueSubmit;
+extern PFN_vkQueueWaitIdle g_pfn_vkQueueWaitIdle;
+extern PFN_vkCreateFence g_pfn_vkCreateFence;
+extern PFN_vkDestroyFence g_pfn_vkDestroyFence;
+extern PFN_vkWaitForFences g_pfn_vkWaitForFences;
+extern PFN_vkResetFences g_pfn_vkResetFences;
+extern PFN_vkCreateBuffer g_pfn_vkCreateBuffer;
+extern PFN_vkDestroyBuffer g_pfn_vkDestroyBuffer;
+extern PFN_vkGetBufferMemoryRequirements g_pfn_vkGetBufferMemoryRequirements;
+extern PFN_vkAllocateMemory g_pfn_vkAllocateMemory;
+extern PFN_vkFreeMemory g_pfn_vkFreeMemory;
+extern PFN_vkBindBufferMemory g_pfn_vkBindBufferMemory;
+extern PFN_vkMapMemory g_pfn_vkMapMemory;
+extern PFN_vkUnmapMemory g_pfn_vkUnmapMemory;
+extern PFN_vkFlushMappedMemoryRanges g_pfn_vkFlushMappedMemoryRanges;
+extern PFN_vkInvalidateMappedMemoryRanges g_pfn_vkInvalidateMappedMemoryRanges;
+extern PFN_vkCreateShaderModule g_pfn_vkCreateShaderModule;
+extern PFN_vkDestroyShaderModule g_pfn_vkDestroyShaderModule;
+extern PFN_vkCreateDescriptorSetLayout g_pfn_vkCreateDescriptorSetLayout;
+extern PFN_vkDestroyDescriptorSetLayout g_pfn_vkDestroyDescriptorSetLayout;
+extern PFN_vkCreatePipelineLayout g_pfn_vkCreatePipelineLayout;
+extern PFN_vkDestroyPipelineLayout g_pfn_vkDestroyPipelineLayout;
+extern PFN_vkCreateComputePipelines g_pfn_vkCreateComputePipelines;
+extern PFN_vkDestroyPipeline g_pfn_vkDestroyPipeline;
+extern PFN_vkCreateDescriptorPool g_pfn_vkCreateDescriptorPool;
+extern PFN_vkDestroyDescriptorPool g_pfn_vkDestroyDescriptorPool;
+extern PFN_vkAllocateDescriptorSets g_pfn_vkAllocateDescriptorSets;
+extern PFN_vkUpdateDescriptorSets g_pfn_vkUpdateDescriptorSets;
+extern PFN_vkCmdBindPipeline g_pfn_vkCmdBindPipeline;
+extern PFN_vkCmdBindDescriptorSets g_pfn_vkCmdBindDescriptorSets;
+extern PFN_vkCmdPushConstants g_pfn_vkCmdPushConstants;
+extern PFN_vkCmdDispatch g_pfn_vkCmdDispatch;
+extern PFN_vkCmdPipelineBarrier g_pfn_vkCmdPipelineBarrier;
+extern PFN_vkCmdCopyBuffer g_pfn_vkCmdCopyBuffer;
+
+// Timestamp & Profiling Queries
+extern PFN_vkCreateQueryPool g_pfn_vkCreateQueryPool;
+extern PFN_vkDestroyQueryPool g_pfn_vkDestroyQueryPool;
+extern PFN_vkCmdResetQueryPool g_pfn_vkCmdResetQueryPool;
+extern PFN_vkCmdWriteTimestamp g_pfn_vkCmdWriteTimestamp;
+extern PFN_vkGetQueryPoolResults g_pfn_vkGetQueryPoolResults;
+extern PFN_vkGetPhysicalDeviceProperties2 g_pfn_vkGetPhysicalDeviceProperties2;
+
+int init_vulkan_dispatch(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // VK_DISPATCH_H

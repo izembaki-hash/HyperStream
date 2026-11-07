@@ -1,0 +1,80 @@
+#define _WIN32_WINNT 0x0600
+#include <windows.h>
+#include <iostream>
+#include "target_qwen2_runner.h"
+#include "qwen2_7b_layout.h"
+#include "vk_engine_qwen2_7b.h"
+
+TargetQwen2Runner::TargetQwen2Runner() {}
+
+TargetQwen2Runner::~TargetQwen2Runner() {
+    cleanup();
+}
+
+bool TargetQwen2Runner::init(const char *model_path) {
+    HANDLE hFile = CreateFileA(model_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        std::cerr << "[Target Runner] Failed to open model: " << model_path << "\n";
+        return false;
+    }
+    m_h_file = (void*)hFile;
+
+    HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMap) {
+        CloseHandle(hFile);
+        return false;
+    }
+    m_h_map = (void*)hMap;
+
+    const uint8_t *file_base = (const uint8_t*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!file_base) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return false;
+    }
+    m_file_base = (void*)file_base;
+
+    auto *engine = new VulkanInferenceEngineQwen2_7B();
+    if (!engine->init()) {
+        delete engine;
+        return false;
+    }
+
+    if (!engine->upload_model_weights(file_base, g_qwen2_offsets)) {
+        delete engine;
+        return false;
+    }
+
+    m_impl = (void*)engine;
+    return true;
+}
+
+void TargetQwen2Runner::reset_kv_cache() {
+    if (m_impl) {
+        ((VulkanInferenceEngineQwen2_7B*)m_impl)->reset_kv_cache();
+    }
+}
+
+int TargetQwen2Runner::forward_token_gpu_argmax(int token_id, int pos) {
+    if (!m_impl) return -1;
+    return ((VulkanInferenceEngineQwen2_7B*)m_impl)->forward_token_gpu_argmax(token_id, pos);
+}
+
+void TargetQwen2Runner::cleanup() {
+    if (m_impl) {
+        delete (VulkanInferenceEngineQwen2_7B*)m_impl;
+        m_impl = nullptr;
+    }
+    if (m_file_base) {
+        UnmapViewOfFile(m_file_base);
+        m_file_base = nullptr;
+    }
+    if (m_h_map) {
+        CloseHandle((HANDLE)m_h_map);
+        m_h_map = nullptr;
+    }
+    if (m_h_file) {
+        CloseHandle((HANDLE)m_h_file);
+        m_h_file = nullptr;
+    }
+}

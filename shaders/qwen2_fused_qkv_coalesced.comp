@@ -1,0 +1,150 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+// Coalesced Fused QKV GEMV for Qwen 2.5 (1 Wavefront per Row + subgroupAdd Reduction + Bias Addition)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConsts {
+    uint num_q_rows; // 896
+    uint num_k_rows; // 128
+    uint num_v_rows; // 128
+    uint cols;       // 896
+} pc;
+
+struct BlockQ8 {
+    float scale;
+    uint qs[8]; // 32 int8 values packed as 8 uint32_t
+};
+
+layout(std430, binding = 0) readonly buffer InputVector {
+    float x[];
+};
+
+layout(std430, binding = 1) readonly buffer WeightQ {
+    BlockQ8 blocks_q[];
+};
+
+layout(std430, binding = 2) readonly buffer WeightK {
+    BlockQ8 blocks_k[];
+};
+
+layout(std430, binding = 3) readonly buffer WeightV {
+    BlockQ8 blocks_v[];
+};
+
+layout(std430, binding = 4) writeonly buffer OutputQ {
+    float q[];
+};
+
+layout(std430, binding = 5) writeonly buffer OutputK {
+    float k[];
+};
+
+layout(std430, binding = 6) writeonly buffer OutputV {
+    float v[];
+};
+
+layout(std430, binding = 7) readonly buffer BiasQ {
+    float bias_q[];
+};
+
+layout(std430, binding = 8) readonly buffer BiasK {
+    float bias_k[];
+};
+
+layout(std430, binding = 9) readonly buffer BiasV {
+    float bias_v[];
+};
+
+void main() {
+    uint r = gl_WorkGroupID.x;
+    uint total_rows = pc.num_q_rows + pc.num_k_rows + pc.num_v_rows;
+    if (r >= total_rows) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint num_blocks = pc.cols / 32;
+
+    float partial_sum = 0.0;
+
+    if (r < pc.num_q_rows) {
+        // Q Projection
+        uint row_block_base = r * num_blocks;
+        for (uint b = tid; b < num_blocks; b += 64) {
+            BlockQ8 blk = blocks_q[row_block_base + b];
+            float b_scale = blk.scale;
+            uint x_base = b * 32;
+            float block_sum = 0.0;
+            for (uint u = 0; u < 8; ++u) {
+                uint pq = blk.qs[u];
+                int q0 = bitfieldExtract(int(pq), 0, 8);
+                int q1 = bitfieldExtract(int(pq), 8, 8);
+                int q2 = bitfieldExtract(int(pq), 16, 8);
+                int q3 = bitfieldExtract(int(pq), 24, 8);
+                uint xi = x_base + u * 4;
+                block_sum += float(q0) * x[xi + 0]
+                           + float(q1) * x[xi + 1]
+                           + float(q2) * x[xi + 2]
+                           + float(q3) * x[xi + 3];
+            }
+            partial_sum += block_sum * b_scale;
+        }
+        float row_sum = subgroupAdd(partial_sum);
+        if (subgroupElect()) {
+            q[r] = row_sum + bias_q[r];
+        }
+    } else if (r < pc.num_q_rows + pc.num_k_rows) {
+        // K Projection
+        uint k_row = r - pc.num_q_rows;
+        uint row_block_base = k_row * num_blocks;
+        for (uint b = tid; b < num_blocks; b += 64) {
+            BlockQ8 blk = blocks_k[row_block_base + b];
+            float b_scale = blk.scale;
+            uint x_base = b * 32;
+            float block_sum = 0.0;
+            for (uint u = 0; u < 8; ++u) {
+                uint pq = blk.qs[u];
+                int q0 = bitfieldExtract(int(pq), 0, 8);
+                int q1 = bitfieldExtract(int(pq), 8, 8);
+                int q2 = bitfieldExtract(int(pq), 16, 8);
+                int q3 = bitfieldExtract(int(pq), 24, 8);
+                uint xi = x_base + u * 4;
+                block_sum += float(q0) * x[xi + 0]
+                           + float(q1) * x[xi + 1]
+                           + float(q2) * x[xi + 2]
+                           + float(q3) * x[xi + 3];
+            }
+            partial_sum += block_sum * b_scale;
+        }
+        float row_sum = subgroupAdd(partial_sum);
+        if (subgroupElect()) {
+            k[k_row] = row_sum + bias_k[k_row];
+        }
+    } else {
+        // V Projection
+        uint v_row = r - pc.num_q_rows - pc.num_k_rows;
+        uint row_block_base = v_row * num_blocks;
+        for (uint b = tid; b < num_blocks; b += 64) {
+            BlockQ8 blk = blocks_v[row_block_base + b];
+            float b_scale = blk.scale;
+            uint x_base = b * 32;
+            float block_sum = 0.0;
+            for (uint u = 0; u < 8; ++u) {
+                uint pq = blk.qs[u];
+                int q0 = bitfieldExtract(int(pq), 0, 8);
+                int q1 = bitfieldExtract(int(pq), 8, 8);
+                int q2 = bitfieldExtract(int(pq), 16, 8);
+                int q3 = bitfieldExtract(int(pq), 24, 8);
+                uint xi = x_base + u * 4;
+                block_sum += float(q0) * x[xi + 0]
+                           + float(q1) * x[xi + 1]
+                           + float(q2) * x[xi + 2]
+                           + float(q3) * x[xi + 3];
+            }
+            partial_sum += block_sum * b_scale;
+        }
+        float row_sum = subgroupAdd(partial_sum);
+        if (subgroupElect()) {
+            v[v_row] = row_sum + bias_v[v_row];
+        }
+    }
+}
