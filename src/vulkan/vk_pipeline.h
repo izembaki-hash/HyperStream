@@ -14,7 +14,8 @@ struct ComputePipeline {
     bool init_from_spv(const VulkanContext &ctx,
                        const uint32_t *spv_code, size_t spv_size_bytes,
                        uint32_t num_storage_buffers,
-                       uint32_t push_constant_size_bytes);
+                       uint32_t push_constant_size_bytes,
+                       const VkSpecializationInfo *spec_info = nullptr);
 
     VkDescriptorSet create_descriptor_set(const VulkanContext &ctx,
                                           const std::vector<VkBuffer> &buffers,

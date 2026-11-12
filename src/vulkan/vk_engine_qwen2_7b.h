@@ -7,7 +7,7 @@
 #include "vk_context.h"
 #include "vk_memory.h"
 #include "vk_pipeline.h"
-#include "qwen2_7b_layout.h"
+#include "model_topology.hpp"
 
 // Q8_0 Block definition (for LM Head)
 struct BlockQ8Qwen2_7B {
@@ -55,8 +55,8 @@ public:
     VulkanInferenceEngineQwen2_7B();
     ~VulkanInferenceEngineQwen2_7B();
 
-    bool init();
-    bool upload_model_weights(const void *raw_mmap_base, const Qwen2Offsets &offsets);
+    bool init(const hyperstream::ModelTopology &topo = {});
+    bool upload_model_weights(const void *raw_mmap_base, const hyperstream::ModelTopology &topo);
     void reset_kv_cache();
 
     // Forward pass on AMD RX 580: returns logits in out_logits [QWEN2_VOCAB_SIZE]
@@ -77,6 +77,7 @@ private:
 
     VulkanContext m_ctx;
     bool m_initialized = false;
+    hyperstream::ModelTopology m_topo;
 
     // Compute Pipelines
     ComputePipeline m_pipe_q4_fused_qkv;

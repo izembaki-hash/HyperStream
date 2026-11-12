@@ -1,4 +1,4 @@
-# ⚡ HyperStream: High-Performance Bare-Metal Vulkan LLM Engine
+# HyperStream: High-Performance Bare-Metal Vulkan LLM Engine
 
 <div align="center">
 
@@ -6,18 +6,18 @@
 [![C++](https://img.shields.io/badge/Language-C%2B%2B17-00599C?logo=c%2B%2B)](https://isocpp.org/)
 [![Vulkan](https://img.shields.io/badge/Vulkan-1.3-red?logo=vulkan)](https://www.vulkan.org/)
 [![Hardware](https://img.shields.io/badge/Tested%20On-AMD%20Radeon%20RX%20580%20(8GB)-ED1C24?logo=amd)](https://www.amd.com/)
-[![Speed](https://img.shields.io/badge/Decode%20Speed-20.4%20Token%2Fsec-success)](#-benchmark-results)
-[![Python Free](https://img.shields.io/badge/Dependencies-Zero%20Python%20%7C%20Zero%20ROCm-brightgreen)](#-architecture-breakthroughs)
+[![Speed](https://img.shields.io/badge/Decode%20Speed-20.4%20Token%2Fsec-success)](#benchmark-results)
+[![Python Free](https://img.shields.io/badge/Dependencies-Zero%20Python%20%7C%20Zero%20ROCm-brightgreen)](#architecture-breakthroughs)
 
 **Run 7B+ Coding Models at 20+ Token/s on an 8-Year-Old 8GB AMD GPU — with Zero Python, Zero ROCm, and Direct GPU Argmax.**
 
-[Key Innovations](#-key-architectural-breakthroughs) • [Benchmarks](#-benchmark-results) • [Quickstart](#-quickstart) • [Supported Models](#-supported-models--placement) • [Architecture](#-low-level-pipeline)
+[Key Innovations](#key-architectural-breakthroughs) • [Benchmarks](#benchmark-results) • [Quickstart](#quickstart) • [Supported Models](#supported-models--placement) • [Architecture](#low-level-pipeline)
 
 </div>
 
 ---
 
-## 🚀 Overview
+## Overview
 
 **HyperStream** is an ultra-fast, bare-metal C++17 Large Language Model (LLM) inference engine designed specifically for consumer and legacy graphics cards (such as the legendary **AMD Radeon RX 580 8GB GDDR5**).
 
@@ -27,7 +27,7 @@ By combining **Planar Q4 Vectorized Dequantization**, **2-Pass Direct GPU Argmax
 
 ---
 
-## 📊 Benchmark Results
+## Benchmark Results
 
 All benchmarks were recorded on an **AMD Radeon RX 580 (Polaris 20, 8GB GDDR5 VRAM)** paired with an **Intel Core i7-7700K CPU**.
 
@@ -71,7 +71,7 @@ HyperStream Engine:
 
 ---
 
-## ⚡ Key Architectural Breakthroughs
+## Key Architectural Breakthroughs
 
 ```
                ┌────────────────────────────────────────────────────────┐
@@ -95,7 +95,7 @@ HyperStream Engine:
                                            │
                                            ▼ (4 bytes)
   ┌─────────────────────────────────────────────────────────────────────────────────┐
-  │             Native C++17 Winsock Server (SSE Streaming on Port 8080)            │
+  │             Native C++17 Server (SSE Streaming on Port 8080)                    │
   └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -114,15 +114,15 @@ HyperStream runs both the primary **Target model (7B)** and the **Draft model (0
 * **Empirical Acceptance Rate:** **$65.7\%$ on code generation**, **$58.3\%$ on multilingual prompts**.
 
 ### 3. Native Monolithic Stack (Zero Python, Zero Middleware)
-HyperStream is completely self-contained in C++17. No Python runtime, no PyTorch, no ONNX, no external heavy frameworks. From loading the `.gguf` file to rendering token streams in the browser, everything runs inside a single lightweight binary.
+HyperStream is completely self-contained in C++17. No Python runtime, no PyTorch, no ONNX, no external heavy frameworks. From parsing the `.gguf` file to rendering token streams in the browser, everything runs inside a single lightweight binary.
 
 ---
 
-## 📦 Supported Model Families & Architectures
+## Supported Model Families & Architectures
 
 HyperStream is an **architecture-level inference engine**. Any model following the **Qwen2/2.5**, **Llama-3/3.1/3.2**, or **DeepSeek-R1-Distill** transformer architectures in `.gguf` format is inherently supported by HyperStream's Vulkan compute pipeline:
 
-### 🌐 Complete Architectural Compatibility Matrix
+### Complete Architectural Compatibility Matrix
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -130,16 +130,16 @@ HyperStream is an **architecture-level inference engine**. Any model following t
 ├──────────────────────────┬───────────────────────────┬─────────────────────────────────────┤
 │ Model Family             │ Parameter Sizes           │ Variants & Fine-Tunes               │
 ├──────────────────────────┼───────────────────────────┼─────────────────────────────────────┤
-│ 🟣 Qwen2.5 / Qwen2       │ 0.5B, 1.5B, 3B, 7B,       │ Qwen2.5-Coder, Qwen2.5-Math,        │
+│ Qwen2.5 / Qwen2          │ 0.5B, 1.5B, 3B, 7B,       │ Qwen2.5-Coder, Qwen2.5-Math,        │
 │                          │ 14B, 32B, 72B             │ Instruct, Base, ChatML              │
 ├──────────────────────────┼───────────────────────────┼─────────────────────────────────────┤
-│ 🔵 DeepSeek-R1 Distill   │ 1.5B, 7B, 8B, 14B, 32B    │ DeepSeek-R1-Distill-Qwen (All sizes)│
+│ DeepSeek-R1 Distill      │ 1.5B, 7B, 8B, 14B, 32B    │ DeepSeek-R1-Distill-Qwen (All sizes)│
 │                          │                           │ DeepSeek-R1-Distill-Llama-8B        │
 ├──────────────────────────┼───────────────────────────┼─────────────────────────────────────┤
-│ 🦙 Llama 3 / 3.1 / 3.2   │ 1B, 3B, 8B, 70B           │ Llama-3.2 (1B, 3B), Llama-3.1 (8B), │
+│ Llama 3 / 3.1 / 3.2      │ 1B, 3B, 8B, 70B           │ Llama-3.2 (1B, 3B), Llama-3.1 (8B), │
 │                          │                           │ Hermes 3, Instruct, Meta Chat       │
 ├──────────────────────────┼───────────────────────────┼─────────────────────────────────────┤
-│ 🧠 Community Reasoning   │ 7B, 14B, 32B              │ Marco-o1, QwQ-32B-Preview,          │
+│ Community Reasoning      │ 7B, 14B, 32B              │ Marco-o1, QwQ-32B-Preview,          │
 │                          │                           │ OpenCodeInterpreter, CodeLlama      │
 └──────────────────────────┴───────────────────────────┴─────────────────────────────────────┘
 ```
@@ -148,7 +148,7 @@ HyperStream is an **architecture-level inference engine**. Any model following t
 
 ---
 
-### 🧪 Empirically Tested & Out-of-the-Box Benchmarked (on RX 580 8GB)
+### Empirically Tested & Out-of-the-Box Benchmarked (on RX 580 8GB)
 
 While the engine supports dozens of models across the families above, the following configurations have been rigorously profiled and benchmarked out-of-the-box:
 
@@ -163,7 +163,7 @@ While the engine supports dozens of models across the families above, the follow
 
 ---
 
-### 📂 Where to Place Models
+### Where to Place Models
 
 Place your `.gguf` files into the `models/` directory:
 
@@ -173,20 +173,17 @@ HyperStream/
 │   └── hyperstream.exe                    <-- Built binary
 ├── models/
 │   ├── qwen2.5-coder-7b-instruct-q4_0.gguf   <-- Put Target model here
-│   ├── qwen2.5-coder-0.5b-instruct-q8_0.gguf <-- Put Draft model here
-│   ├── qwen_vocab_tokens.bin                 <-- Tokenizer binary
-│   ├── qwen_vocab_map.bin
-│   └── qwen_merges_table.bin
+│   └── qwen2.5-coder-0.5b-instruct-q8_0.gguf <-- Put Draft model here
 ├── shaders/                               <-- SPIR-V Compute Shaders
 └── web/
     └── web_ui.html                        <-- Real-time Web UI
 ```
 
-> 💡 **Custom Path:** You can also point to any model path on your system via CLI flags (e.g. `--model "D:\LLM\model.gguf"`).
+> **Custom Path:** You can point to any model path on your system via CLI flags (e.g. `--model "D:\LLM\model.gguf"`).
 
 ---
 
-## 🛠️ Quickstart
+## Quickstart
 
 ### Prerequisites
 * **Windows 10/11** or **Linux**
@@ -209,24 +206,15 @@ mkdir build && cd build
 cmake ..
 cmake --build . --config Release
 ```
+```
 
 The executable will be compiled to `bin/hyperstream.exe`.
 
 ---
 
-### 2. Export Tokenizer Tables (One-Time Setup)
+### 2. Run the Inference Server
 
-Generate the ultra-fast BPE lookup tables for Qwen ($151,936$ tokens) in 3 seconds:
-
-```bash
-python scripts/export_qwen_merges.py
-```
-
-This generates `models/qwen_vocab_tokens.bin`, `models/qwen_vocab_map.bin`, and `models/qwen_merges_table.bin`.
-
----
-
-### 3. Run the Inference Server
+Zero external Python dependencies, zero pre-conversion steps, zero intermediate `.bin` merge files. Simply pass your `.gguf` model directly:
 
 ```bash
 # Run with default models in models/
@@ -236,17 +224,17 @@ bin\hyperstream.exe
 bin\hyperstream.exe --model "models/qwen2.5-coder-7b-instruct-q4_0.gguf" --draft "models/qwen2.5-coder-0.5b-instruct-q8_0.gguf" --port 8080
 ```
 
-Open your browser at **`http://localhost:8080`** to access the interactive web chat interface with live token-per-second and speculative acceptance metrics!
+Open your browser at `http://localhost:8080` to access the interactive web chat interface with live token-per-second and speculative acceptance metrics.
 
 ---
 
-## 🖥️ Web UI & SSE API
+## Web UI & SSE API
 
 HyperStream includes a built-in dark-mode Web UI with full support for:
 * **Real-time Server-Sent Events (SSE)** token streaming.
 * **Full Arabic & Multilingual Support** (with zero UTF-8 mojibake).
 * **Live Telemetry:** Real-time token rate (T/s), total tokens, and speculative acceptance rate.
-* **Mode Toggling:** Switch seamlessly between **⚡ Ultra-Fast 7B Direct Mode** and **🧠 Speculative Dual-Resident Mode**.
+* **Mode Toggling:** Switch seamlessly between **Ultra-Fast 7B Direct Mode** and **Speculative Dual-Resident Mode**.
 
 ```bash
 # Direct API Usage (cURL example)
@@ -255,27 +243,30 @@ curl -N "http://localhost:8080/api/generate?prompt=Write%20a%20fast%20quicksort%
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [x] Bare-Metal Vulkan 1.3 Compute Engine
 - [x] Planar Q4 Vectorized Memory Dequantization (128-bit `vec4` + `unpackHalf2x16`)
 - [x] 2-Pass Parallel Reduction GPU Argmax (Zero-PCIe bottleneck)
 - [x] Qwen2.5-Coder-7B Full GQA 7:1 & RoPE Verification
 - [x] Dual-Resident Speculative Decoding (Target 7B + Draft 0.5B in 8GB VRAM)
-- [x] Native C++ Winsock Server with Web UI & SSE streaming
-- [ ] Dynamic GGUF Metadata Parser (Zero pre-compilation layout headers)
-- [ ] PagedAttention & Continuous KV Cache Expansion
-- [ ] Batched Speculative Target Verification
+- [x] Native C++ Server with Web UI & SSE streaming
+- [x] Native C++17 GGUF v3 Metadata Parser (Zero pre-compilation layout headers)
+- [x] In-Engine BPE Tokenizer (Zero Python scripts, direct from GGUF metadata)
+- [x] Vulkan Specialization Constants (Driver-level compile-time tensor optimization)
+- [x] Paged KV Cache Architecture (8K context within 8GB VRAM)
+- [x] Spec-Tree 7-Candidate Speculative Decoding with 2D Mask Verification
+- [x] 100% Pass across 4-Tier E2E Test Suite (16 suites, 103/103 tests passing)
 - [ ] HyperStream-MoE: Dynamic Sparse Expert Streaming for 30B+ architectures
 
 ---
 
-## 📄 License
+## License
 
-This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
 
 ---
 
 <div align="center">
-Developed with ❤️ for the open-source AI community and the revival of consumer GPUs.
+Developed for the open-source AI community and the revival of consumer GPUs.
 </div>

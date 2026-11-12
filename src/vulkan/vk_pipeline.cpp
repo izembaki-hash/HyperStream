@@ -4,7 +4,8 @@
 bool ComputePipeline::init_from_spv(const VulkanContext &ctx,
                                    const uint32_t *spv_code, size_t spv_size_bytes,
                                    uint32_t num_storage_buffers,
-                                   uint32_t push_constant_size_bytes) {
+                                   uint32_t push_constant_size_bytes,
+                                   const VkSpecializationInfo *spec_info) {
     // 1. Create Shader Module
     VkShaderModuleCreateInfo sm_info = {};
     sm_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -66,6 +67,7 @@ bool ComputePipeline::init_from_spv(const VulkanContext &ctx,
     cp_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cp_info.stage.module = shader_module;
     cp_info.stage.pName = "main";
+    cp_info.stage.pSpecializationInfo = spec_info;
     cp_info.layout = pipeline_layout;
 
     res = g_pfn_vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1, &cp_info, NULL, &pipeline);

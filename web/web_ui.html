@@ -298,15 +298,15 @@
 
     <header>
         <div class="brand">
-            <h2>⚡ HyperStream</h2>
+            <h2>HyperStream</h2>
             <span class="brand-badge" id="engineBadge">Qwen2.5 Dual-Resident (RX 580)</span>
         </div>
         <div class="live-stats">
             <div class="stat-badge" style="border-color: var(--accent-cyan);">
                 <label style="font-size:0.8rem; color:var(--text-muted); margin-left:6px;">الوضع:</label>
                 <select id="backendSelect" style="background:var(--bg-input); color:var(--text-main); border:none; font-size:0.85rem; font-weight:700; cursor:pointer; outline:none;">
-                    <option value="vulkan" selected>⚡ فائق السرعة: 7B مباشر (18-20 T/s)</option>
-                    <option value="speculative">🧠 تخمين ذكي: 7B + 0.5B Draft (Resident)</option>
+                    <option value="vulkan" selected>[Vulkan] فائق السرعة: 7B مباشر (18-20 T/s)</option>
+                    <option value="speculative">[Spec-Tree] تخمين ذكي: 7B + 0.5B Draft (Resident)</option>
                 </select>
             </div>
             <div class="stat-badge" id="badgeAcceptRate" style="border-color: var(--accent-purple); display: none;">
@@ -335,7 +335,7 @@
                 <div class="msg-avatar avatar-ai">AI</div>
                 <div class="msg-content">
                     <p>مرحباً بك! أنا أعمل الآن بنموذج البرمجة المتقدم <strong>Qwen2.5-Coder-7B</strong> مقترناً بنموذج التخمين <strong>0.5B Draft</strong> عبر محرك <strong>HyperStream Native Vulkan</strong> المقيمين معاً في ذاكرة <strong>AMD Radeon RX 580 (8GB GDDR5)</strong>.</p>
-                    <p>🚀 <strong>المميزات النشطة الآن:</strong></p>
+                    <p><strong>المميزات النشطة الآن:</strong></p>
                     <ul style="margin: 8px 24px; line-height: 1.8;">
                         <li><strong>Dual-Resident VRAM:</strong> كلا النموذجين (7B Q4 + 0.5B Q8) مقيمان معاً في ذاكرة كارت الشاشة باستهلاك <strong>4.73 GB فقط</strong> دون أي تفريغ لذاكرة النظام (0 CPU offload).</li>
                         <li><strong>الوضع فائق السرعة (18~20 T/s):</strong> توليد مباشر بأقصى سرعة لفك التكميم و GPU Argmax المباشر.</li>
@@ -354,7 +354,7 @@
 
         <div class="input-bar">
             <textarea id="promptInput" placeholder="اكتب سؤالك هنا واضغط Enter للإرسال..." onkeydown="handleKey(event)"></textarea>
-            <button class="send-btn" id="sendBtn" onclick="sendPrompt()">إرسال 🚀</button>
+            <button class="send-btn" id="sendBtn" onclick="sendPrompt()">إرسال</button>
         </div>
     </main>
 

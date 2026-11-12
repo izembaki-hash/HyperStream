@@ -28,3 +28,6 @@ models/*.bin
 # Operating System Files
 .DS_Store
 Thumbs.db
+
+# Agent Workspaces & Logs
+.agents/

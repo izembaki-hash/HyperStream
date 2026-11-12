@@ -1,14 +1,10 @@
-#define _WIN32_WINNT 0x0600
-#include <winsock2.h>
-#include <windows.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <math.h>
-#include <time.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cmath>
+#include <ctime>
 #include <immintrin.h>
 #include <omp.h>
-#include <shellapi.h>
 
 #include <string>
 #include <vector>
@@ -17,48 +13,40 @@
 #include <iomanip>
 #include <fstream>
 #include <chrono>
+#include <filesystem>
+
+#if defined(_WIN32) || defined(_WIN64)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+#endif
 
 #include "vulkan/draft_qwen2_runner.h"
 #include "vulkan/target_qwen2_runner.h"
+#include "gguf_parser.hpp"
 #include "bpe_tokenizer.hpp"
+#include "net/socket.hpp"
 
-static const uint32_t *g_vocab_offsets = NULL;
-static const char *g_vocab_strings = NULL;
-static BPETokenizer g_tokenizer;
+static hyperstream::BPETokenizer g_tokenizer;
 static std::string g_html_content;
 
 static TargetQwen2Runner g_target_engine;
 static DraftQwen2Runner  g_draft_engine;
 static bool g_draft_loaded = false;
 
-void load_vocab(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *buf = (uint8_t*)malloc(sz);
-    fread(buf, 1, sz, f);
-    fclose(f);
-    g_vocab_offsets = (const uint32_t*)buf;
-    g_vocab_strings = (const char*)(buf + 151936 * sizeof(uint32_t));
-}
-
-const char* get_token_str(int token_id) {
-    if (!g_vocab_strings || token_id < 0 || token_id >= 151936) return "";
-    return g_vocab_strings + g_vocab_offsets[token_id];
-}
-
 std::string url_decode(const std::string &src) {
     std::string ret;
     char ch;
-    int i, ii;
-    for (i = 0; i < (int)src.length(); i++) {
+    int ii;
+    for (size_t i = 0; i < src.length(); i++) {
         if (src[i] == '%') {
-            sscanf(src.substr(i + 1, 2).c_str(), "%x", &ii);
-            ch = static_cast<char>(ii);
-            ret += ch;
-            i = i + 2;
+            if (i + 2 < src.length()) {
+                sscanf(src.substr(i + 1, 2).c_str(), "%x", &ii);
+                ch = static_cast<char>(ii);
+                ret += ch;
+                i = i + 2;
+            }
         } else if (src[i] == '+') {
             ret += ' ';
         } else {
@@ -72,7 +60,7 @@ std::string json_escape(const std::string &s) {
     std::string out;
     out.reserve(s.size() + 16);
     for (size_t i = 0; i < s.size(); ++i) {
-        unsigned char c = (unsigned char)s[i];
+        unsigned char c = static_cast<unsigned char>(s[i]);
         switch (c) {
             case '"':  out += "\\\""; break;
             case '\\': out += "\\\\"; break;
@@ -87,7 +75,7 @@ std::string json_escape(const std::string &s) {
                     snprintf(buf, sizeof(buf), "\\u%04x", c);
                     out += buf;
                 } else {
-                    out += (char)c;
+                    out += static_cast<char>(c);
                 }
                 break;
         }
@@ -96,12 +84,14 @@ std::string json_escape(const std::string &s) {
 }
 
 bool file_exists(const std::string &path) {
-    DWORD dwAttrib = GetFileAttributesA(path.c_str());
-    return (dwAttrib != INVALID_FILE_ATTRIBUTES && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
 }
 
 int main(int argc, char **argv) {
+#if defined(_WIN32) || defined(_WIN64)
     SetConsoleOutputCP(CP_UTF8);
+#endif
 
     int port = 8080;
     std::string model_target = "models/qwen2.5-coder-7b-instruct-q4_0.gguf";
@@ -137,7 +127,7 @@ int main(int argc, char **argv) {
     }
 
     std::cout << "=========================================================================================\n";
-    std::cout << "   ⚡ HYPERSTREAM: HIGH-PERFORMANCE BARE-METAL VULKAN INFERENCE ENGINE\n";
+    std::cout << "   [INFO] HYPERSTREAM: HIGH-PERFORMANCE BARE-METAL VULKAN INFERENCE ENGINE\n";
     std::cout << "   Dual-Resident LLM Acceleration for AMD Radeon & Vulkan-Compatible GPUs\n";
     std::cout << "=========================================================================================\n\n";
 
@@ -148,33 +138,44 @@ int main(int argc, char **argv) {
         buffer << html_file.rdbuf();
         g_html_content = buffer.str();
     } else {
-        std::cerr << "Warning: Could not open web UI at: " << web_path << "\n";
+        std::cerr << "[WARN] Could not open web UI at: " << web_path << "\n";
     }
 
-    // 2. Load Vocab & Tokenizer
-    std::cout << "[1/3] Loading Tokenizer Tables...\n";
-    std::string vocab_tok = file_exists("models/qwen_vocab_tokens.bin") ? "models/qwen_vocab_tokens.bin" : "qwen_vocab_tokens.bin";
-    std::string vocab_map = file_exists("models/qwen_vocab_map.bin") ? "models/qwen_vocab_map.bin" : "qwen_vocab_map.bin";
-    std::string vocab_mrg = file_exists("models/qwen_merges_table.bin") ? "models/qwen_merges_table.bin" : "qwen_merges_table.bin";
+    // 2. Load In-Engine Tokenizer Directly from GGUF Metadata (Zero External Scripts)
+    std::cout << "[1/3] Loading Tokenizer from GGUF Model Metadata...\n";
+    hyperstream::GGUFParser target_parser;
+    bool tokenizer_loaded = false;
 
-    if (!file_exists(vocab_tok) && file_exists("H:\\asurrini\\qwen_vocab_tokens.bin")) {
-        vocab_tok = "H:\\asurrini\\qwen_vocab_tokens.bin";
-        vocab_map = "H:\\asurrini\\qwen_vocab_map.bin";
-        vocab_mrg = "H:\\asurrini\\qwen_merges_table.bin";
+    if (target_parser.open(model_target)) {
+        if (g_tokenizer.load_from_gguf(target_parser)) {
+            tokenizer_loaded = true;
+            std::cout << "      [SUCCESS] Tokenizer Ready: " << g_tokenizer.vocab_size() 
+                      << " tokens loaded directly from GGUF.\n\n";
+        }
     }
 
-    load_vocab(vocab_tok.c_str());
-    if (!g_tokenizer.load(vocab_map.c_str(), vocab_mrg.c_str())) {
-        std::cerr << "Failed to load tokenizer binary tables!\n"
-                  << "Please run 'python scripts/export_qwen_merges.py' to generate them.\n";
+    if (!tokenizer_loaded) {
+        // Fallback to draft model for tokenizer metadata if target open failed
+        hyperstream::GGUFParser draft_parser;
+        if (draft_parser.open(model_draft)) {
+            if (g_tokenizer.load_from_gguf(draft_parser)) {
+                tokenizer_loaded = true;
+                std::cout << "      [SUCCESS] Tokenizer Ready: " << g_tokenizer.vocab_size() 
+                          << " tokens loaded from draft GGUF.\n\n";
+            }
+        }
+    }
+
+    if (!tokenizer_loaded) {
+        std::cerr << "[ERROR] Failed to load tokenizer directly from GGUF!\n"
+                  << "Please verify that the target model GGUF contains valid tokenizer metadata.\n";
         return 1;
     }
-    std::cout << "      Tokenizer Ready: " << g_tokenizer.vocab.size() << " tokens loaded.\n\n";
 
     // 3. Initialize Target Model
     std::cout << "[2/3] Uploading Target Model to VRAM: " << model_target << " ...\n";
     if (!g_target_engine.init(model_target.c_str())) {
-        std::cerr << "Error: Target model failed to initialize! Check file path and VRAM capacity.\n";
+        std::cerr << "[ERROR] Target model failed to initialize! Check file path and VRAM capacity.\n";
         return 1;
     }
 
@@ -183,51 +184,40 @@ int main(int argc, char **argv) {
         std::cout << "[3/3] Uploading Draft Model to VRAM: " << model_draft << " ...\n";
         if (g_draft_engine.init(model_draft.c_str())) {
             g_draft_loaded = true;
-            std::cout << "      ✅ Both Models Resident Concurrently in GPU VRAM (Speculative Mode Active)!\n\n";
+            std::cout << "      [SUCCESS] Both Models Resident Concurrently in GPU VRAM (Speculative Mode Active)!\n\n";
         } else {
-            std::cout << "      ⚠️ Draft model initialization skipped. Standalone mode active.\n\n";
+            std::cout << "      [WARN] Draft model initialization skipped. Standalone mode active.\n\n";
         }
     } else {
         std::cout << "[3/3] Draft model not found (" << model_draft << "). Running in standalone Target mode.\n\n";
     }
 
-    // 5. Initialize Winsock HTTP Server
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-        std::cerr << "WSAStartup failed!\n";
+    // 5. Initialize Cross-Platform Socket Server
+    if (!hyperstream::Socket::init_networking()) {
+        std::cerr << "[ERROR] Failed to initialize networking subsystem!\n";
         return 1;
     }
 
-    SOCKET server_sock = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port);
-
-    if (bind(server_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed on port " << port << "!\n";
+    hyperstream::Socket server_sock;
+    if (!server_sock.listen(static_cast<uint16_t>(port))) {
+        std::cerr << "[ERROR] Bind/Listen failed on port " << port << "!\n";
+        hyperstream::Socket::cleanup_networking();
         return 1;
     }
 
-    listen(server_sock, 10);
     std::cout << "=========================================================================================\n";
-    std::cout << "🌐 HYPERSTREAM SERVER READY at: http://localhost:" << port << "\n";
+    std::cout << "[SERVER] HYPERSTREAM SERVER READY at: http://localhost:" << port << "\n";
     std::cout << "   Open your web browser to start real-time GPU inference.\n";
     std::cout << "=========================================================================================\n\n";
 
     while (true) {
-        sockaddr_in client_addr;
-        int client_len = sizeof(client_addr);
-        SOCKET client_sock = accept(server_sock, (sockaddr*)&client_addr, &client_len);
-        if (client_sock == INVALID_SOCKET) continue;
+        hyperstream::Socket client_sock;
+        if (!server_sock.accept(client_sock)) continue;
 
         char req_buf[4096] = {0};
-        int bytes_read = recv(client_sock, req_buf, sizeof(req_buf) - 1, 0);
+        int bytes_read = client_sock.recv(req_buf, sizeof(req_buf) - 1);
         if (bytes_read <= 0) {
-            closesocket(client_sock);
+            client_sock.close();
             continue;
         }
 
@@ -242,8 +232,8 @@ int main(int argc, char **argv) {
             }
             std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
                                std::to_string(cur_html.size()) + "\r\nConnection: close\r\n\r\n" + cur_html;
-            send(client_sock, resp.c_str(), (int)resp.size(), 0);
-            closesocket(client_sock);
+            client_sock.send(resp.c_str(), resp.size());
+            client_sock.close();
         } else if (request.rfind("GET /api/generate", 0) == 0) {
             std::string prompt = "";
             size_t p_pos = request.find("prompt=");
@@ -271,27 +261,31 @@ int main(int argc, char **argv) {
                 backend = "vulkan";
             }
 
-            std::cout << "📩 Request: \"" << prompt << "\" [Mode: " << backend << "]\n";
+            std::cout << "[REQUEST] Request: \"" << prompt << "\" [Mode: " << backend << "]\n";
 
             std::string sse_hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
-            send(client_sock, sse_hdr.c_str(), (int)sse_hdr.size(), 0);
+            client_sock.send(sse_hdr.c_str(), sse_hdr.size());
 
-            // Construct Qwen ChatML Format
+            // Construct ChatML Format using in-engine tokenizer special tokens
+            int im_start = g_tokenizer.im_start_token();
+            int im_end = g_tokenizer.im_end_token();
+            int eos = g_tokenizer.eos_token();
+
             std::vector<int> prompt_tokens;
-            prompt_tokens.push_back(151644); // <|im_start|>
+            if (im_start >= 0) prompt_tokens.push_back(im_start);
             for (int t : g_tokenizer.tokenize("system\nYou are a helpful and concise coding assistant.")) prompt_tokens.push_back(t);
-            prompt_tokens.push_back(151645); // <|im_end|>
-            prompt_tokens.push_back(198);    // \n
+            if (im_end >= 0) prompt_tokens.push_back(im_end);
+            for (int t : g_tokenizer.tokenize("\n")) prompt_tokens.push_back(t);
 
-            prompt_tokens.push_back(151644); // <|im_start|>
+            if (im_start >= 0) prompt_tokens.push_back(im_start);
             for (int t : g_tokenizer.tokenize("user\n" + prompt)) prompt_tokens.push_back(t);
-            prompt_tokens.push_back(151645); // <|im_end|>
-            prompt_tokens.push_back(198);    // \n
+            if (im_end >= 0) prompt_tokens.push_back(im_end);
+            for (int t : g_tokenizer.tokenize("\n")) prompt_tokens.push_back(t);
 
-            prompt_tokens.push_back(151644); // <|im_start|>
+            if (im_start >= 0) prompt_tokens.push_back(im_start);
             for (int t : g_tokenizer.tokenize("assistant\n")) prompt_tokens.push_back(t);
 
-            int prompt_len = (int)prompt_tokens.size();
+            int prompt_len = static_cast<int>(prompt_tokens.size());
 
             // Reset KV Caches
             g_target_engine.reset_kv_cache();
@@ -318,15 +312,15 @@ int main(int argc, char **argv) {
                 int total_drafted = 0;
                 int total_accepted = 0;
 
-                if (cur_token != 151645 && cur_token != 151643) {
-                    const char *piece = get_token_str(cur_token);
+                if (cur_token != im_end && cur_token != eos) {
+                    std::string piece = g_tokenizer.decode(cur_token);
                     tokens_generated++;
                     std::string sse_evt = "data: {\"token\": \"" + json_escape(piece) + "\", \"tok_sec\": 18.0, \"accept_rate\": 0.0}\n\n";
-                    send(client_sock, sse_evt.c_str(), (int)sse_evt.size(), 0);
+                    client_sock.send(sse_evt.c_str(), sse_evt.size());
                 }
 
                 while (tokens_generated < MAX_GEN) {
-                    if (cur_token == 151645 || cur_token == 151643) break;
+                    if (cur_token == im_end || cur_token == eos) break;
 
                     std::vector<int> drafted(K);
                     int d_tok = cur_token;
@@ -349,20 +343,20 @@ int main(int argc, char **argv) {
                             tokens_generated++;
                             tokens_advanced++;
 
-                            const char *piece = get_token_str(drafted[k]);
+                            std::string piece = g_tokenizer.decode(drafted[k]);
                             auto now = std::chrono::high_resolution_clock::now();
                             double el_s = std::chrono::duration<double>(now - gen_t0).count();
                             double tps = (el_s > 0) ? (tokens_generated / el_s) : 0.0;
-                            double acc = (total_drafted > 0) ? ((double)total_accepted / total_drafted * 100.0) : 0.0;
+                            double acc = (total_drafted > 0) ? (static_cast<double>(total_accepted) / total_drafted * 100.0) : 0.0;
 
                             std::string sse_evt = "data: {\"token\": \"" + json_escape(piece) + "\", \"tok_sec\": " + std::to_string(tps) + ", \"accept_rate\": " + std::to_string(acc) + "}\n\n";
-                            if (send(client_sock, sse_evt.c_str(), (int)sse_evt.size(), 0) == SOCKET_ERROR) {
+                            if (client_sock.send(sse_evt.c_str(), sse_evt.size()) <= 0) {
                                 client_disconnected = true;
                                 break;
                             }
 
                             verify_tok = drafted[k];
-                            if (drafted[k] == 151645 || drafted[k] == 151643) {
+                            if (drafted[k] == im_end || drafted[k] == eos) {
                                 next_seq_tok = drafted[k];
                                 break;
                             }
@@ -371,22 +365,22 @@ int main(int argc, char **argv) {
                                 int bonus_tok = g_target_engine.forward_token_gpu_argmax(drafted[k], cur_pos + K);
                                 tokens_generated++;
                                 tokens_advanced++;
-                                const char *b_piece = get_token_str(bonus_tok);
+                                std::string b_piece = g_tokenizer.decode(bonus_tok);
                                 std::string sse_bonus = "data: {\"token\": \"" + json_escape(b_piece) + "\", \"tok_sec\": " + std::to_string(tps) + ", \"accept_rate\": " + std::to_string(acc) + "}\n\n";
-                                send(client_sock, sse_bonus.c_str(), (int)sse_bonus.size(), 0);
+                                client_sock.send(sse_bonus.c_str(), sse_bonus.size());
                                 next_seq_tok = bonus_tok;
                             }
                         } else {
                             tokens_generated++;
                             tokens_advanced++;
-                            const char *piece = get_token_str(target_pred);
+                            std::string piece = g_tokenizer.decode(target_pred);
                             auto now = std::chrono::high_resolution_clock::now();
                             double el_s = std::chrono::duration<double>(now - gen_t0).count();
                             double tps = (el_s > 0) ? (tokens_generated / el_s) : 0.0;
-                            double acc = (total_drafted > 0) ? ((double)total_accepted / total_drafted * 100.0) : 0.0;
+                            double acc = (total_drafted > 0) ? (static_cast<double>(total_accepted) / total_drafted * 100.0) : 0.0;
 
                             std::string sse_evt = "data: {\"token\": \"" + json_escape(piece) + "\", \"tok_sec\": " + std::to_string(tps) + ", \"accept_rate\": " + std::to_string(acc) + "}\n\n";
-                            if (send(client_sock, sse_evt.c_str(), (int)sse_evt.size(), 0) == SOCKET_ERROR) {
+                            if (client_sock.send(sse_evt.c_str(), sse_evt.size()) <= 0) {
                                 client_disconnected = true;
                             }
                             next_seq_tok = target_pred;
@@ -400,9 +394,9 @@ int main(int argc, char **argv) {
                 }
             } else {
                 for (int step = 0; step < MAX_GEN; step++) {
-                    if (cur_token == 151645 || cur_token == 151643) break;
+                    if (cur_token == im_end || cur_token == eos) break;
 
-                    const char *piece = get_token_str(cur_token);
+                    std::string piece = g_tokenizer.decode(cur_token);
                     tokens_generated++;
 
                     auto now = std::chrono::high_resolution_clock::now();
@@ -410,7 +404,7 @@ int main(int argc, char **argv) {
                     double tps = (el_s > 0) ? (tokens_generated / el_s) : 0.0;
 
                     std::string sse_evt = "data: {\"token\": \"" + json_escape(piece) + "\", \"tok_sec\": " + std::to_string(tps) + ", \"accept_rate\": 100.0}\n\n";
-                    if (send(client_sock, sse_evt.c_str(), (int)sse_evt.size(), 0) == SOCKET_ERROR) {
+                    if (client_sock.send(sse_evt.c_str(), sse_evt.size()) <= 0) {
                         break;
                     }
 
@@ -420,24 +414,24 @@ int main(int argc, char **argv) {
             }
 
             std::string done_evt = "data: [DONE]\n\n";
-            send(client_sock, done_evt.c_str(), (int)done_evt.size(), 0);
-            closesocket(client_sock);
+            client_sock.send(done_evt.c_str(), done_evt.size());
+            client_sock.close();
 
             auto gen_t1 = std::chrono::high_resolution_clock::now();
             double total_time_ms = std::chrono::duration<double, std::milli>(gen_t1 - gen_t0).count();
             if (tokens_generated > 0) {
-                std::cout << "Done: " << tokens_generated << " tokens in " << total_time_ms << " ms ("
+                std::cout << "[INFO] Done: " << tokens_generated << " tokens in " << total_time_ms << " ms ("
                           << std::fixed << std::setprecision(2) << (tokens_generated / (total_time_ms / 1000.0)) << " Token/sec)\n\n";
             }
         } else {
             std::string resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            send(client_sock, resp.c_str(), (int)resp.size(), 0);
-            closesocket(client_sock);
+            client_sock.send(resp.c_str(), resp.size());
+            client_sock.close();
         }
     }
 
-    closesocket(server_sock);
-    WSACleanup();
+    server_sock.close();
+    hyperstream::Socket::cleanup_networking();
     g_target_engine.cleanup();
     if (g_draft_loaded) g_draft_engine.cleanup();
     return 0;

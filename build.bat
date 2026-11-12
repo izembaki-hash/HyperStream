@@ -8,6 +8,7 @@ if not exist bin mkdir bin
 g++ -O3 -std=c++17 -fopenmp -mavx2 -mf16c ^
     -I. -Iinclude -Isrc ^
     src/main.cpp ^
+    src/bpe_tokenizer.cpp ^
     src/vulkan/draft_qwen2_runner.cpp ^
     src/vulkan/target_qwen2_runner.cpp ^
     src/vulkan/vk_engine_qwen2.cpp ^

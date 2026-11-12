@@ -2,7 +2,8 @@
 #include <windows.h>
 #include <iostream>
 #include "draft_qwen2_runner.h"
-#include "qwen2_0_5b_layout.h"
+#include "model_topology.hpp"
+#include "gguf_parser.hpp"
 #include "vk_engine_qwen2.h"
 
 DraftQwen2Runner::DraftQwen2Runner() {}
@@ -19,9 +20,18 @@ bool DraftQwen2Runner::init(const char *model_path) {
     }
     m_h_file = (void*)hFile;
 
+    LARGE_INTEGER liSize;
+    if (!GetFileSizeEx(hFile, &liSize)) {
+        CloseHandle(hFile);
+        m_h_file = nullptr;
+        return false;
+    }
+    size_t file_size = static_cast<size_t>(liSize.QuadPart);
+
     HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
     if (!hMap) {
         CloseHandle(hFile);
+        m_h_file = nullptr;
         return false;
     }
     m_h_map = (void*)hMap;
@@ -30,17 +40,31 @@ bool DraftQwen2Runner::init(const char *model_path) {
     if (!file_base) {
         CloseHandle(hMap);
         CloseHandle(hFile);
+        m_h_map = nullptr;
+        m_h_file = nullptr;
         return false;
     }
     m_file_base = (void*)file_base;
 
+    hyperstream::GGUFParser parser;
+    if (!parser.parse_from_memory(file_base, file_size)) {
+        std::cerr << "[Draft Runner] Failed to parse GGUF model: " << model_path << "\n";
+        return false;
+    }
+
+    hyperstream::ModelTopology topo;
+    if (!hyperstream::ModelTopology::build_from_gguf(parser, topo)) {
+        std::cerr << "[Draft Runner] Failed to build ModelTopology from GGUF\n";
+        return false;
+    }
+
     auto *engine = new VulkanInferenceEngineQwen2();
-    if (!engine->init()) {
+    if (!engine->init(topo)) {
         delete engine;
         return false;
     }
 
-    if (!engine->upload_model_weights(file_base, g_qwen2_offsets)) {
+    if (!engine->upload_model_weights(file_base, topo)) {
         delete engine;
         return false;
     }

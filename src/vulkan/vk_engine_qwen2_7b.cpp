@@ -122,7 +122,22 @@ VulkanInferenceEngineQwen2_7B::~VulkanInferenceEngineQwen2_7B() {
     cleanup();
 }
 
-bool VulkanInferenceEngineQwen2_7B::init() {
+bool VulkanInferenceEngineQwen2_7B::init(const hyperstream::ModelTopology &topo) {
+    if (topo.hidden_size > 0) {
+        m_topo = topo;
+    } else {
+        // Fallback default for 7B
+        m_topo.num_layers = 28;
+        m_topo.hidden_size = 3584;
+        m_topo.intermediate_size = 18944;
+        m_topo.num_heads = 28;
+        m_topo.num_kv_heads = 4;
+        m_topo.head_dim = 128;
+        m_topo.vocab_size = 152064;
+        m_topo.rms_norm_eps = 1e-6f;
+        m_topo.rope_freq_base = 1000000.0f;
+    }
+
     if (!m_ctx.init()) {
         std::cerr << "[Vulkan Qwen2 7B Engine] Context initialization failed.\n";
         return false;
@@ -168,52 +183,55 @@ bool VulkanInferenceEngineQwen2_7B::init() {
 }
 
 bool VulkanInferenceEngineQwen2_7B::init_pipelines() {
+    hyperstream::SpecializationInfoHelper spec_helper = m_topo.create_specialization_info(1024);
+    const VkSpecializationInfo *spec_info = spec_helper.get();
+
     // 1. RMSNorm (push consts: 8 bytes; 3 buffers: in, w, out)
-    if (!m_pipe_rmsnorm.init_from_spv(m_ctx, spv_qwen2_rmsnorm_data, spv_qwen2_rmsnorm_size, 3, 8)) {
+    if (!m_pipe_rmsnorm.init_from_spv(m_ctx, spv_qwen2_rmsnorm_data, spv_qwen2_rmsnorm_size, 3, 8, spec_info)) {
         return false;
     }
 
     // 2. Q4 Fused QKV GEMV (push consts: 16 bytes; 7 buffers: in, quants, scales, out_q, out_k, out_v, bias)
-    if (!m_pipe_q4_fused_qkv.init_from_spv(m_ctx, spv_qwen2_q4_fused_qkv_data, spv_qwen2_q4_fused_qkv_size, 7, 16)) {
+    if (!m_pipe_q4_fused_qkv.init_from_spv(m_ctx, spv_qwen2_q4_fused_qkv_data, spv_qwen2_q4_fused_qkv_size, 7, 16, spec_info)) {
         return false;
     }
 
     // 3. RoPE & KV Cache (push consts: 24 bytes; 6 buffers: q, k, v, k_cache, v_cache, pos)
-    if (!m_pipe_rope_cache.init_from_spv(m_ctx, spv_qwen2_rope_cache_data, spv_qwen2_rope_cache_size, 6, 24)) {
+    if (!m_pipe_rope_cache.init_from_spv(m_ctx, spv_qwen2_rope_cache_data, spv_qwen2_rope_cache_size, 6, 24, spec_info)) {
         return false;
     }
 
     // 4. Attention (push consts: 24 bytes; 5 buffers: q, k_cache, v_cache, out, pos)
-    if (!m_pipe_attention.init_from_spv(m_ctx, spv_qwen2_attention_data, spv_qwen2_attention_size, 5, 24)) {
+    if (!m_pipe_attention.init_from_spv(m_ctx, spv_qwen2_attention_data, spv_qwen2_attention_size, 5, 24, spec_info)) {
         return false;
     }
 
     // 5. Q4 GEMV with optional residual add (push consts: 12 bytes; 4 buffers: in, quants, scales, out)
-    if (!m_pipe_q4_gemv.init_from_spv(m_ctx, spv_qwen2_q4_gemv_data, spv_qwen2_q4_gemv_size, 4, 12)) {
+    if (!m_pipe_q4_gemv.init_from_spv(m_ctx, spv_qwen2_q4_gemv_data, spv_qwen2_q4_gemv_size, 4, 12, spec_info)) {
         return false;
     }
 
     // 6. Q4 Fused SwiGLU GEMV (push consts: 8 bytes; 6 buffers: in, q_gate, s_gate, q_up, s_up, out)
-    if (!m_pipe_q4_fused_swiglu.init_from_spv(m_ctx, spv_qwen2_q4_fused_swiglu_data, spv_qwen2_q4_fused_swiglu_size, 6, 8)) {
+    if (!m_pipe_q4_fused_swiglu.init_from_spv(m_ctx, spv_qwen2_q4_fused_swiglu_data, spv_qwen2_q4_fused_swiglu_size, 6, 8, spec_info)) {
         return false;
     }
 
     // 7. Q8 GEMV (for LM Head; push consts: 8 bytes; 3 buffers: in, w, out)
-    if (!m_pipe_q8_gemv.init_from_spv(m_ctx, spv_qwen2_q8_gemv_data, spv_qwen2_q8_gemv_size, 3, 8)) {
+    if (!m_pipe_q8_gemv.init_from_spv(m_ctx, spv_qwen2_q8_gemv_data, spv_qwen2_q8_gemv_size, 3, 8, spec_info)) {
         return false;
     }
 
     // 8. Argmax Pass 1 (push consts: 4 bytes; 3 buffers: in_logits, part_vals, part_ids)
-    if (!m_pipe_argmax_p1.init_from_spv(m_ctx, spv_qwen2_argmax_pass1_data, spv_qwen2_argmax_pass1_size, 3, 4)) {
+    if (!m_pipe_argmax_p1.init_from_spv(m_ctx, spv_qwen2_argmax_pass1_data, spv_qwen2_argmax_pass1_size, 3, 4, spec_info)) {
         return false;
     }
 
     // 9. Argmax Pass 2 (push consts: 4 bytes; 3 buffers: part_vals, part_ids, result_id)
-    if (!m_pipe_argmax_p2.init_from_spv(m_ctx, spv_qwen2_argmax_pass2_data, spv_qwen2_argmax_pass2_size, 3, 4)) {
+    if (!m_pipe_argmax_p2.init_from_spv(m_ctx, spv_qwen2_argmax_pass2_data, spv_qwen2_argmax_pass2_size, 3, 4, spec_info)) {
         return false;
     }
 
-    std::cout << "[Vulkan Qwen2 7B Engine] All Compute Pipelines compiled and loaded.\n";
+    std::cout << "[Vulkan Qwen2 7B Engine] All Compute Pipelines compiled and specialized with VkSpecializationInfo.\n";
     return true;
 }
 
@@ -225,29 +243,29 @@ bool VulkanInferenceEngineQwen2_7B::allocate_buffers() {
     VkMemoryPropertyFlags host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
     // Intermediate activations
-    m_act_x.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_flags);
-    g_pfn_vkMapMemory(m_ctx.device, m_act_x.memory, 0, QWEN2_HIDDEN_SIZE * sizeof(float), 0, &m_act_x.mapped_ptr);
+    m_act_x.allocate(m_ctx, m_topo.hidden_size * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_flags);
+    g_pfn_vkMapMemory(m_ctx.device, m_act_x.memory, 0, m_topo.hidden_size * sizeof(float), 0, &m_act_x.mapped_ptr);
 
-    m_act_norm_x.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_q.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_k.allocate(m_ctx, QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM * sizeof(float), storage_usage, vram_flags);
-    m_act_v.allocate(m_ctx, QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM * sizeof(float), storage_usage, vram_flags);
-    m_act_head_outputs.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_attn_out.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_post_norm_x.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_mlp_hidden.allocate(m_ctx, QWEN2_INTERMEDIATE_SIZE * sizeof(float), storage_usage, vram_flags);
-    m_act_mlp_out.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), storage_usage, vram_flags);
+    m_act_norm_x.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
+    m_act_q.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
+    m_act_k.allocate(m_ctx, m_topo.num_kv_heads * m_topo.head_dim * sizeof(float), storage_usage, vram_flags);
+    m_act_v.allocate(m_ctx, m_topo.num_kv_heads * m_topo.head_dim * sizeof(float), storage_usage, vram_flags);
+    m_act_head_outputs.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
+    m_act_attn_out.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
+    m_act_post_norm_x.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
+    m_act_mlp_hidden.allocate(m_ctx, m_topo.intermediate_size * sizeof(float), storage_usage, vram_flags);
+    m_act_mlp_out.allocate(m_ctx, m_topo.hidden_size * sizeof(float), storage_usage, vram_flags);
 
     // Host-visible Logits buffer
-    m_act_logits.allocate(m_ctx, QWEN2_VOCAB_SIZE * sizeof(float), storage_usage, host_flags);
-    g_pfn_vkMapMemory(m_ctx.device, m_act_logits.memory, 0, QWEN2_VOCAB_SIZE * sizeof(float), 0, &m_act_logits.mapped_ptr);
+    m_act_logits.allocate(m_ctx, m_topo.vocab_size * sizeof(float), storage_usage, host_flags);
+    g_pfn_vkMapMemory(m_ctx.device, m_act_logits.memory, 0, m_topo.vocab_size * sizeof(float), 0, &m_act_logits.mapped_ptr);
 
     // Sequence position buffer
     m_buf_pos.allocate(m_ctx, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_flags);
     g_pfn_vkMapMemory(m_ctx.device, m_buf_pos.memory, 0, sizeof(uint32_t), 0, &m_buf_pos.mapped_ptr);
 
-    // KV Cache in VRAM: [28 layers * 1024 seq * 512 kv_dim] floats (~58.7 MB each)
-    size_t kv_cache_size = (size_t)QWEN2_NUM_LAYERS * 1024 * (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * sizeof(float);
+    // KV Cache in VRAM: [layers * 1024 seq * kv_dim] floats
+    size_t kv_cache_size = (size_t)m_topo.num_layers * 1024 * (m_topo.num_kv_heads * m_topo.head_dim) * sizeof(float);
     m_buf_k_cache.allocate(m_ctx, kv_cache_size, storage_usage, vram_flags);
     m_buf_v_cache.allocate(m_ctx, kv_cache_size, storage_usage, vram_flags);
 
@@ -264,15 +282,16 @@ bool VulkanInferenceEngineQwen2_7B::allocate_buffers() {
 }
 
 void VulkanInferenceEngineQwen2_7B::reset_kv_cache() {
-    size_t kv_cache_size = (size_t)QWEN2_NUM_LAYERS * 1024 * (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * sizeof(float);
+    size_t kv_cache_size = (size_t)m_topo.num_layers * 1024 * (m_topo.num_kv_heads * m_topo.head_dim) * sizeof(float);
     std::vector<float> zeros(kv_cache_size / sizeof(float), 0.0f);
     m_buf_k_cache.upload_staging(m_ctx, zeros.data(), kv_cache_size);
     m_buf_v_cache.upload_staging(m_ctx, zeros.data(), kv_cache_size);
 }
 
-bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_base, const Qwen2Offsets &offsets) {
-    const uint8_t *base = (const uint8_t*)raw_mmap_base + QWEN2_DATA_START_OFFSET;
-    m_raw_embed_base = base + offsets.embed_tokens;
+bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_base, const hyperstream::ModelTopology &topo) {
+    m_topo = topo;
+    const uint8_t *base = (const uint8_t*)raw_mmap_base + m_topo.data_start_offset;
+    m_raw_embed_base = base + m_topo.token_embd_offset;
 
     std::cout << "[Vulkan Qwen2 7B Engine] Uploading weights to AMD RX 580 VRAM (Q4_0 Planar + Q8_0 LM Head)...\n";
 
@@ -280,23 +299,23 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
     VkMemoryPropertyFlags vram_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
     // 1. Final Output Norm
-    m_w_final_norm.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), w_usage, vram_flags);
-    m_w_final_norm.upload_staging(m_ctx, base + offsets.final_norm, QWEN2_HIDDEN_SIZE * sizeof(float));
+    m_w_final_norm.allocate(m_ctx, m_topo.hidden_size * sizeof(float), w_usage, vram_flags);
+    m_w_final_norm.upload_staging(m_ctx, base + m_topo.output_norm_offset, m_topo.hidden_size * sizeof(float));
 
-    // 2. LM Head (output.weight): [152064, 3584] Q6_K -> converted on CPU to Q8_0
-    size_t total_q8_blocks = (size_t)QWEN2_VOCAB_SIZE * (QWEN2_HIDDEN_SIZE / QK8_0);
+    // 2. LM Head (output.weight): [vocab_size, hidden_size] Q6_K -> converted on CPU to Q8_0
+    size_t total_q8_blocks = (size_t)m_topo.vocab_size * (m_topo.hidden_size / QK8_0);
     std::vector<BlockQ8Qwen2_7B> q8_lm_head(total_q8_blocks);
-    const GGUFBlockQ6_K *q6_base = (const GGUFBlockQ6_K*)(base + offsets.lm_head);
-    int q6_k_blocks_per_row = QWEN2_HIDDEN_SIZE / QK_K;
+    const GGUFBlockQ6_K *q6_base = (const GGUFBlockQ6_K*)(base + m_topo.output_weight_offset);
+    int q6_k_blocks_per_row = m_topo.hidden_size / QK_K;
 
-    std::cout << "  Dequantizing LM Head (Q6_K -> Q8_0) across 152,064 rows...\n";
+    std::cout << "  Dequantizing LM Head (Q6_K -> Q8_0) across " << m_topo.vocab_size << " rows...\n";
     #pragma omp parallel for schedule(static)
-    for (int r = 0; r < QWEN2_VOCAB_SIZE; r++) {
+    for (int r = 0; r < (int)m_topo.vocab_size; r++) {
         dequantize_q6_k_to_q8_0_row(q6_base + (size_t)r * q6_k_blocks_per_row,
-                                    q8_lm_head.data() + (size_t)r * (QWEN2_HIDDEN_SIZE / QK8_0),
-                                    QWEN2_HIDDEN_SIZE);
+                                    q8_lm_head.data() + (size_t)r * (m_topo.hidden_size / QK8_0),
+                                    m_topo.hidden_size);
     }
-    std::cout << "  LM Head dequantization done! Uploading 552 MB to VRAM...\n";
+    std::cout << "  LM Head dequantization done! Uploading to VRAM...\n";
 
     m_w_lm_head.allocate(m_ctx, total_q8_blocks * sizeof(BlockQ8Qwen2_7B), w_usage, vram_flags);
     m_w_lm_head.upload_staging(m_ctx, q8_lm_head.data(), total_q8_blocks * sizeof(BlockQ8Qwen2_7B));
@@ -309,11 +328,11 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
     m_ds_arg_p1 = m_pipe_argmax_p1.create_descriptor_set(m_ctx, { m_act_logits.buffer, m_buf_arg_part_vals.buffer, m_buf_arg_part_ids.buffer }, {});
     m_ds_arg_p2 = m_pipe_argmax_p2.create_descriptor_set(m_ctx, { m_buf_arg_part_vals.buffer, m_buf_arg_part_ids.buffer, m_buf_arg_token_result.buffer }, {});
 
-    // 3. 28 Transformer Layers
-    m_layers.resize(QWEN2_NUM_LAYERS);
-    uint32_t hidden_blocks = QWEN2_HIDDEN_SIZE / 32;                  // 112
-    uint32_t kv_blocks = (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) / 32; // 16
-    uint32_t mlp_blocks = QWEN2_INTERMEDIATE_SIZE / 32;               // 592
+    // 3. Transformer Layers
+    m_layers.resize(m_topo.num_layers);
+    uint32_t hidden_blocks = m_topo.hidden_size / 32;
+    uint32_t kv_blocks = (m_topo.num_kv_heads * m_topo.head_dim) / 32;
+    uint32_t mlp_blocks = m_topo.intermediate_size / 32;
 
     std::vector<uvec4> quants_buf;
     std::vector<uint32_t> scales_buf;
@@ -342,8 +361,8 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     g_pfn_vkCreateFence(m_ctx.device, &fence_info, NULL, &transfer_fence);
 
-    for (int l = 0; l < QWEN2_NUM_LAYERS; l++) {
-        const auto &lo = offsets.layers[l];
+    for (uint32_t l = 0; l < m_topo.num_layers; l++) {
+        const auto &lo = m_topo.layers[l];
         auto &lw = m_layers[l];
 
         VkCommandBufferBeginInfo begin_info = {};
@@ -364,23 +383,23 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
         };
 
         // Input Norm
-        lw.input_layernorm.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), w_usage, vram_flags);
-        stage_and_record(lw.input_layernorm, base + lo.input_layernorm, QWEN2_HIDDEN_SIZE * sizeof(float));
+        lw.input_layernorm.allocate(m_ctx, m_topo.hidden_size * sizeof(float), w_usage, vram_flags);
+        stage_and_record(lw.input_layernorm, base + lo.attn_norm, m_topo.hidden_size * sizeof(float));
 
-        // Fused QKV (concat Q, K, V rows into a single planar matrix: 4608 x 112 blocks)
-        uint32_t total_qkv_rows = QWEN2_HIDDEN_SIZE + (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * 2; // 4608
+        // Fused QKV (concat Q, K, V rows into a single planar matrix)
+        uint32_t total_qkv_rows = m_topo.hidden_size + (m_topo.num_kv_heads * m_topo.head_dim) * 2;
         size_t total_qkv_blocks = (size_t)total_qkv_rows * hidden_blocks;
         std::vector<GGUFBlockQ4_0> fused_qkv_blocks(total_qkv_blocks);
 
         // Copy Q
-        size_t q_blocks = (size_t)QWEN2_HIDDEN_SIZE * hidden_blocks;
-        memcpy(fused_qkv_blocks.data(), base + lo.q_proj, q_blocks * sizeof(GGUFBlockQ4_0));
+        size_t q_blocks = (size_t)m_topo.hidden_size * hidden_blocks;
+        memcpy(fused_qkv_blocks.data(), base + lo.q_weight, q_blocks * sizeof(GGUFBlockQ4_0));
         // Copy K
-        size_t k_blocks = (size_t)(QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * hidden_blocks;
-        memcpy(fused_qkv_blocks.data() + q_blocks, base + lo.k_proj, k_blocks * sizeof(GGUFBlockQ4_0));
+        size_t k_blocks = (size_t)(m_topo.num_kv_heads * m_topo.head_dim) * hidden_blocks;
+        memcpy(fused_qkv_blocks.data() + q_blocks, base + lo.k_weight, k_blocks * sizeof(GGUFBlockQ4_0));
         // Copy V
         size_t v_blocks = k_blocks;
-        memcpy(fused_qkv_blocks.data() + q_blocks + k_blocks, base + lo.v_proj, v_blocks * sizeof(GGUFBlockQ4_0));
+        memcpy(fused_qkv_blocks.data() + q_blocks + k_blocks, base + lo.v_weight, v_blocks * sizeof(GGUFBlockQ4_0));
 
         // Split to planar
         split_q4_planar(fused_qkv_blocks.data(), total_qkv_blocks, quants_buf, scales_buf);
@@ -393,16 +412,16 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
 
         // Concat QKV Biases
         std::vector<float> fused_bias(total_qkv_rows);
-        memcpy(fused_bias.data(), base + lo.q_bias, QWEN2_HIDDEN_SIZE * sizeof(float));
-        memcpy(fused_bias.data() + QWEN2_HIDDEN_SIZE, base + lo.k_bias, (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * sizeof(float));
-        memcpy(fused_bias.data() + QWEN2_HIDDEN_SIZE + (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM), base + lo.v_bias, (QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM) * sizeof(float));
+        memcpy(fused_bias.data(), base + lo.q_bias, m_topo.hidden_size * sizeof(float));
+        memcpy(fused_bias.data() + m_topo.hidden_size, base + lo.k_bias, (m_topo.num_kv_heads * m_topo.head_dim) * sizeof(float));
+        memcpy(fused_bias.data() + m_topo.hidden_size + (m_topo.num_kv_heads * m_topo.head_dim), base + lo.v_bias, (m_topo.num_kv_heads * m_topo.head_dim) * sizeof(float));
 
         lw.qkv_bias.allocate(m_ctx, total_qkv_rows * sizeof(float), w_usage, vram_flags);
         stage_and_record(lw.qkv_bias, fused_bias.data(), total_qkv_rows * sizeof(float));
 
-        // O Proj (Attn Output: 3584 x 112 blocks)
-        size_t o_blocks = (size_t)QWEN2_HIDDEN_SIZE * hidden_blocks;
-        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.o_proj), o_blocks, quants_buf, scales_buf);
+        // O Proj
+        size_t o_blocks = (size_t)m_topo.hidden_size * hidden_blocks;
+        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.o_weight), o_blocks, quants_buf, scales_buf);
 
         lw.o_proj_quants.allocate(m_ctx, quants_buf.size() * sizeof(uvec4), w_usage, vram_flags);
         stage_and_record(lw.o_proj_quants, quants_buf.data(), quants_buf.size() * sizeof(uvec4));
@@ -411,12 +430,12 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
         stage_and_record(lw.o_proj_scales, scales_buf.data(), scales_buf.size() * sizeof(uint32_t));
 
         // Post Attention Norm
-        lw.post_attn_layernorm.allocate(m_ctx, QWEN2_HIDDEN_SIZE * sizeof(float), w_usage, vram_flags);
-        stage_and_record(lw.post_attn_layernorm, base + lo.post_attn_layernorm, QWEN2_HIDDEN_SIZE * sizeof(float));
+        lw.post_attn_layernorm.allocate(m_ctx, m_topo.hidden_size * sizeof(float), w_usage, vram_flags);
+        stage_and_record(lw.post_attn_layernorm, base + lo.ffn_norm, m_topo.hidden_size * sizeof(float));
 
-        // Gate Proj (18944 x 112 blocks)
-        size_t gate_blocks = (size_t)QWEN2_INTERMEDIATE_SIZE * hidden_blocks;
-        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.gate_proj), gate_blocks, quants_buf, scales_buf);
+        // Gate Proj
+        size_t gate_blocks = (size_t)m_topo.intermediate_size * hidden_blocks;
+        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.gate_weight), gate_blocks, quants_buf, scales_buf);
 
         lw.gate_quants.allocate(m_ctx, quants_buf.size() * sizeof(uvec4), w_usage, vram_flags);
         stage_and_record(lw.gate_quants, quants_buf.data(), quants_buf.size() * sizeof(uvec4));
@@ -424,9 +443,9 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
         lw.gate_scales.allocate(m_ctx, scales_buf.size() * sizeof(uint32_t), w_usage, vram_flags);
         stage_and_record(lw.gate_scales, scales_buf.data(), scales_buf.size() * sizeof(uint32_t));
 
-        // Up Proj (18944 x 112 blocks)
-        size_t up_blocks = (size_t)QWEN2_INTERMEDIATE_SIZE * hidden_blocks;
-        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.up_proj), up_blocks, quants_buf, scales_buf);
+        // Up Proj
+        size_t up_blocks = (size_t)m_topo.intermediate_size * hidden_blocks;
+        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.up_weight), up_blocks, quants_buf, scales_buf);
 
         lw.up_quants.allocate(m_ctx, quants_buf.size() * sizeof(uvec4), w_usage, vram_flags);
         stage_and_record(lw.up_quants, quants_buf.data(), quants_buf.size() * sizeof(uvec4));
@@ -434,9 +453,9 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
         lw.up_scales.allocate(m_ctx, scales_buf.size() * sizeof(uint32_t), w_usage, vram_flags);
         stage_and_record(lw.up_scales, scales_buf.data(), scales_buf.size() * sizeof(uint32_t));
 
-        // Down Proj (3584 x 592 blocks)
-        size_t down_blocks = (size_t)QWEN2_HIDDEN_SIZE * mlp_blocks;
-        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.down_proj), down_blocks, quants_buf, scales_buf);
+        // Down Proj
+        size_t down_blocks = (size_t)m_topo.hidden_size * mlp_blocks;
+        split_q4_planar((const GGUFBlockQ4_0*)(base + lo.down_weight), down_blocks, quants_buf, scales_buf);
 
         lw.down_quants.allocate(m_ctx, quants_buf.size() * sizeof(uvec4), w_usage, vram_flags);
         stage_and_record(lw.down_quants, quants_buf.data(), quants_buf.size() * sizeof(uvec4));
@@ -490,8 +509,8 @@ bool VulkanInferenceEngineQwen2_7B::upload_model_weights(const void *raw_mmap_ba
             m_act_mlp_hidden.buffer, lw.down_quants.buffer, lw.down_scales.buffer, m_act_x.buffer
         }, {});
 
-        if ((l + 1) % 4 == 0 || l == QWEN2_NUM_LAYERS - 1) {
-            std::cout << "  [Layer " << (l + 1) << "/" << QWEN2_NUM_LAYERS << "] Uploaded and Descriptors Bound.\n";
+        if ((l + 1) % 4 == 0 || l == m_topo.num_layers - 1) {
+            std::cout << "  [Layer " << (l + 1) << "/" << m_topo.num_layers << "] Uploaded and Descriptors Bound.\n";
         }
     }
 
@@ -521,13 +540,13 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         g_pfn_vkBeginCommandBuffer(cb, &begin_info);
 
-        for (int l = 0; l < QWEN2_NUM_LAYERS; l++) {
+        for (uint32_t l = 0; l < m_topo.num_layers; l++) {
             const auto &ly = m_layers[l];
 
             // 1. Input RMSNorm (m_act_x -> m_act_norm_x)
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline_layout, 0, 1, &ly.ds_input_norm, 0, nullptr);
-            struct { uint32_t size; float eps; } norm_pc = { QWEN2_HIDDEN_SIZE, QWEN2_RMS_NORM_EPS };
+            struct { uint32_t size; float eps; } norm_pc = { m_topo.hidden_size, m_topo.rms_norm_eps };
             g_pfn_vkCmdPushConstants(cb, m_pipe_rmsnorm.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(norm_pc), &norm_pc);
             g_pfn_vkCmdDispatch(cb, 1, 1, 1);
 
@@ -537,10 +556,10 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_fused_qkv.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_fused_qkv.pipeline_layout, 0, 1, &ly.ds_fused_qkv, 0, nullptr);
             struct { uint32_t nq, nk, nv, cols; } qkv_pc = {
-                QWEN2_HIDDEN_SIZE,
-                QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM,
-                QWEN2_NUM_KV_HEADS * QWEN2_HEAD_DIM,
-                QWEN2_HIDDEN_SIZE
+                m_topo.hidden_size,
+                m_topo.num_kv_heads * m_topo.head_dim,
+                m_topo.num_kv_heads * m_topo.head_dim,
+                m_topo.hidden_size
             };
             g_pfn_vkCmdPushConstants(cb, m_pipe_q4_fused_qkv.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(qkv_pc), &qkv_pc);
             g_pfn_vkCmdDispatch(cb, qkv_pc.nq + qkv_pc.nk + qkv_pc.nv, 1, 1);
@@ -558,15 +577,16 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
                 uint32_t head_dim;
                 float theta;
             } rope_pc = {
-                (uint32_t)l, 1024, QWEN2_NUM_HEADS, QWEN2_NUM_KV_HEADS, QWEN2_HEAD_DIM, QWEN2_ROPE_THETA
+                l, 1024, m_topo.num_heads, m_topo.num_kv_heads, m_topo.head_dim, m_topo.rope_freq_base
             };
             g_pfn_vkCmdPushConstants(cb, m_pipe_rope_cache.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rope_pc), &rope_pc);
-            uint32_t total_pairs = (QWEN2_NUM_HEADS > QWEN2_NUM_KV_HEADS ? QWEN2_NUM_HEADS : QWEN2_NUM_KV_HEADS) * (QWEN2_HEAD_DIM / 2);
+            uint32_t max_heads = (m_topo.num_heads > m_topo.num_kv_heads ? m_topo.num_heads : m_topo.num_kv_heads);
+            uint32_t total_pairs = max_heads * (m_topo.head_dim / 2);
             g_pfn_vkCmdDispatch(cb, (total_pairs + 63) / 64, 1, 1);
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            // 4. Attention (GQA: 28 Query heads, 4 KV heads)
+            // 4. Attention
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_attention.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_attention.pipeline_layout, 0, 1, &ly.ds_attention, 0, nullptr);
             struct {
@@ -577,23 +597,23 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
                 uint32_t head_dim;
                 float inv_sqrt_d;
             } attn_pc = {
-                (uint32_t)l, 1024, QWEN2_NUM_HEADS, QWEN2_NUM_KV_HEADS, QWEN2_HEAD_DIM, 1.0f / sqrtf((float)QWEN2_HEAD_DIM)
+                l, 1024, m_topo.num_heads, m_topo.num_kv_heads, m_topo.head_dim, 1.0f / sqrtf((float)m_topo.head_dim)
             };
             g_pfn_vkCmdPushConstants(cb, m_pipe_attention.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(attn_pc), &attn_pc);
-            g_pfn_vkCmdDispatch(cb, QWEN2_NUM_HEADS, 1, 1);
+            g_pfn_vkCmdDispatch(cb, m_topo.num_heads, 1, 1);
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            // 5. O Projection (Q4 GEMV with add_residual = 1 directly into m_act_x!)
+            // 5. O Projection
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_gemv.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_gemv.pipeline_layout, 0, 1, &ly.ds_o_proj, 0, nullptr);
-            struct { uint32_t rows, cols, add_residual; } o_pc = { QWEN2_HIDDEN_SIZE, QWEN2_HIDDEN_SIZE, 1u };
+            struct { uint32_t rows, cols, add_residual; } o_pc = { m_topo.hidden_size, m_topo.hidden_size, 1u };
             g_pfn_vkCmdPushConstants(cb, m_pipe_q4_gemv.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(o_pc), &o_pc);
-            g_pfn_vkCmdDispatch(cb, QWEN2_HIDDEN_SIZE, 1, 1);
+            g_pfn_vkCmdDispatch(cb, m_topo.hidden_size, 1, 1);
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            // 6. Post-Attention RMSNorm (m_act_x -> m_act_post_norm_x)
+            // 6. Post-Attention RMSNorm
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline_layout, 0, 1, &ly.ds_post_norm, 0, nullptr);
             g_pfn_vkCmdPushConstants(cb, m_pipe_rmsnorm.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(norm_pc), &norm_pc);
@@ -601,21 +621,21 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            // 7. Fused SwiGLU GEMV (m_act_post_norm_x -> m_act_mlp_hidden)
+            // 7. Fused SwiGLU GEMV
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_fused_swiglu.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_fused_swiglu.pipeline_layout, 0, 1, &ly.ds_fused_swiglu, 0, nullptr);
-            struct { uint32_t rows, cols; } swiglu_pc = { QWEN2_INTERMEDIATE_SIZE, QWEN2_HIDDEN_SIZE };
+            struct { uint32_t rows, cols; } swiglu_pc = { m_topo.intermediate_size, m_topo.hidden_size };
             g_pfn_vkCmdPushConstants(cb, m_pipe_q4_fused_swiglu.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(swiglu_pc), &swiglu_pc);
-            g_pfn_vkCmdDispatch(cb, QWEN2_INTERMEDIATE_SIZE, 1, 1);
+            g_pfn_vkCmdDispatch(cb, m_topo.intermediate_size, 1, 1);
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-            // 8. Down Projection (Q4 GEMV with add_residual = 1 directly into m_act_x!)
+            // 8. Down Projection
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_gemv.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q4_gemv.pipeline_layout, 0, 1, &ly.ds_down_proj, 0, nullptr);
-            struct { uint32_t rows, cols, add_residual; } down_pc = { QWEN2_HIDDEN_SIZE, QWEN2_INTERMEDIATE_SIZE, 1u };
+            struct { uint32_t rows, cols, add_residual; } down_pc = { m_topo.hidden_size, m_topo.intermediate_size, 1u };
             g_pfn_vkCmdPushConstants(cb, m_pipe_q4_gemv.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(down_pc), &down_pc);
-            g_pfn_vkCmdDispatch(cb, QWEN2_HIDDEN_SIZE, 1, 1);
+            g_pfn_vkCmdDispatch(cb, m_topo.hidden_size, 1, 1);
 
             g_pfn_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
@@ -623,7 +643,7 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
         // Final RMSNorm
         g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline);
         g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_rmsnorm.pipeline_layout, 0, 1, &m_ds_final_norm, 0, nullptr);
-        struct { uint32_t size; float eps; } fnorm_pc = { QWEN2_HIDDEN_SIZE, QWEN2_RMS_NORM_EPS };
+        struct { uint32_t size; float eps; } fnorm_pc = { m_topo.hidden_size, m_topo.rms_norm_eps };
         g_pfn_vkCmdPushConstants(cb, m_pipe_rmsnorm.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fnorm_pc), &fnorm_pc);
         g_pfn_vkCmdDispatch(cb, 1, 1, 1);
 
@@ -632,9 +652,9 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
         // LM Head Q8 GEMV (m_act_norm_x -> m_act_logits)
         g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q8_gemv.pipeline);
         g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_q8_gemv.pipeline_layout, 0, 1, &m_ds_lm_head, 0, nullptr);
-        struct { uint32_t rows, cols; } lm_pc = { QWEN2_VOCAB_SIZE, QWEN2_HIDDEN_SIZE };
+        struct { uint32_t rows, cols; } lm_pc = { m_topo.vocab_size, m_topo.hidden_size };
         g_pfn_vkCmdPushConstants(cb, m_pipe_q8_gemv.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(lm_pc), &lm_pc);
-        g_pfn_vkCmdDispatch(cb, QWEN2_VOCAB_SIZE, 1, 1);
+        g_pfn_vkCmdDispatch(cb, m_topo.vocab_size, 1, 1);
 
         if (mode == 1) {
             // GPU Argmax Pass 1 & 2
@@ -642,7 +662,7 @@ void VulkanInferenceEngineQwen2_7B::record_forward_command_buffer() {
 
             g_pfn_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_argmax_p1.pipeline);
             g_pfn_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipe_argmax_p1.pipeline_layout, 0, 1, &m_ds_arg_p1, 0, nullptr);
-            uint32_t vocab_size = QWEN2_VOCAB_SIZE;
+            uint32_t vocab_size = m_topo.vocab_size;
             g_pfn_vkCmdPushConstants(cb, m_pipe_argmax_p1.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vocab_size), &vocab_size);
             g_pfn_vkCmdDispatch(cb, 128, 1, 1);
 
@@ -663,7 +683,7 @@ bool VulkanInferenceEngineQwen2_7B::forward_token(int token_id, int pos, float *
     if (!m_initialized) return false;
 
     // 1. Dequantize Q4_0 token embedding directly to m_act_x in host-visible VRAM
-    uint32_t blocks_per_row = QWEN2_HIDDEN_SIZE / 32; // 112
+    uint32_t blocks_per_row = m_topo.hidden_size / 32;
     const GGUFBlockQ4_0 *row = (const GGUFBlockQ4_0*)(m_raw_embed_base + (size_t)token_id * blocks_per_row * sizeof(GGUFBlockQ4_0));
     float *dst = (float*)m_act_x.mapped_ptr;
 
@@ -695,7 +715,7 @@ bool VulkanInferenceEngineQwen2_7B::forward_token(int token_id, int pos, float *
     if (res != VK_SUCCESS) return false;
 
     if (out_logits) {
-        memcpy(out_logits, m_act_logits.mapped_ptr, QWEN2_VOCAB_SIZE * sizeof(float));
+        memcpy(out_logits, m_act_logits.mapped_ptr, m_topo.vocab_size * sizeof(float));
     }
     return true;
 }
@@ -704,7 +724,7 @@ int VulkanInferenceEngineQwen2_7B::forward_token_gpu_argmax(int token_id, int po
     if (!m_initialized) return -1;
 
     // 1. Dequantize Q4_0 token embedding directly to m_act_x in host-visible VRAM
-    uint32_t blocks_per_row = QWEN2_HIDDEN_SIZE / 32; // 112
+    uint32_t blocks_per_row = m_topo.hidden_size / 32;
     const GGUFBlockQ4_0 *row = (const GGUFBlockQ4_0*)(m_raw_embed_base + (size_t)token_id * blocks_per_row * sizeof(GGUFBlockQ4_0));
     float *dst = (float*)m_act_x.mapped_ptr;
 
